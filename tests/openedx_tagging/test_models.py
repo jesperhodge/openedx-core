@@ -50,6 +50,7 @@ class TestTagTaxonomyMixin:
         self.chordata = get_tag("Chordata")
         self.mammalia = get_tag("Mammalia")
         self.animalia = get_tag("Animalia")
+        self.eukaryota = get_tag("Eukaryota")
         self.system_taxonomy_tag = get_tag("System Tag 1")
         self.english_tag = self.language_taxonomy.tag_for_external_id("en")
         self.user_1 = get_user_model()(
@@ -543,7 +544,9 @@ class TestFilteredTagsClosedTaxonomy(TestTagTaxonomyMixin, TestCase):
 
     def test_usage_count(self) -> None:
         """
-        Test that the usage count in the results is right
+        Test that the usage count in the results is right for a basic case;
+        many objects tagged seperately should return a simple usage count that
+        reflects lineage de-duplication (or lack thereof, in this case)
         """
         api.tag_object(object_id="obj01", taxonomy=self.taxonomy, tags=["Bacteria"])
         api.tag_object(object_id="obj02", taxonomy=self.taxonomy, tags=["Bacteria"])
@@ -552,7 +555,7 @@ class TestFilteredTagsClosedTaxonomy(TestTagTaxonomyMixin, TestCase):
         # Now the API should reflect these usage counts:
         result = pretty_format_tags(self.taxonomy.get_filtered_tags(search_term="bacteria", include_counts=True))
         assert result == [
-            "Bacteria (None) (used: 3, children: 2)",
+            "Bacteria (None) (used: 4, children: 2)",
             "  Archaebacteria (Bacteria) (used: 0, children: 0)",
             "  Eubacteria (Bacteria) (used: 1, children: 0)",
         ]
@@ -561,8 +564,226 @@ class TestFilteredTagsClosedTaxonomy(TestTagTaxonomyMixin, TestCase):
             self.taxonomy.get_filtered_tags(search_term="bacteria", include_counts=True, depth=1)
         )
         assert result1 == [
-            "Bacteria (None) (used: 3, children: 2)",
+            "Bacteria (None) (used: 4, children: 2)",
         ]
+
+    def test_usage_count_lineage_count_across_same_course(self) -> None:
+        """
+        Test that the usage count is correct and parent counts are included based on
+        child tags being added to an object. However, we de-duplicate and only count
+        1 parent tag towards a course even if 2 children are applied to that course
+        """
+        api.tag_object(object_id="obj01", taxonomy=self.taxonomy, tags=["Bacteria"])
+        api.tag_object(object_id="obj01", taxonomy=self.taxonomy, tags=["Archaebacteria"])
+        api.tag_object(object_id="obj02", taxonomy=self.taxonomy, tags=["Archaebacteria"])
+        api.tag_object(object_id="obj01", taxonomy=self.taxonomy, tags=["Eubacteria"])
+        # Now the API should reflect these usage counts:
+        result = pretty_format_tags(self.taxonomy.get_filtered_tags(search_term="bacteria", include_counts=True))
+        assert result == [
+            "Bacteria (None) (used: 2, children: 2)",
+            "  Archaebacteria (Bacteria) (used: 1, children: 0)",
+            "  Eubacteria (Bacteria) (used: 1, children: 0)",
+        ]
+        # Same with depth=1, which uses a different query internally:
+        result1 = pretty_format_tags(
+            self.taxonomy.get_filtered_tags(search_term="bacteria", include_counts=True, depth=1)
+        )
+        assert result1 == [
+            "Bacteria (None) (used: 2, children: 2)",
+        ]
+
+    def test_usage_count_rolls_up_to_ancestors_deep(self) -> None:
+        """
+        AI/Claude4.6 generated via IntelliJ IDEA AI Assistant
+        When a child tag (depth 3) is applied to an object, it should
+        roll up the count to all its ancestors when using _get_filtered_tags_deep.
+        The child tag and each of its ancestors should have usage_count=1.
+        """
+        api.tag_object("obj:1", self.taxonomy, [self.mammalia.value])
+        result = pretty_format_tags(self.taxonomy.get_filtered_tags(include_counts=True))
+        assert result == [
+            "Archaea (None) (used: 0, children: 3)",
+            "  DPANN (Archaea) (used: 0, children: 0)",
+            "  Euryarchaeida (Archaea) (used: 0, children: 0)",
+            "  Proteoarchaeota (Archaea) (used: 0, children: 0)",
+            "Bacteria (None) (used: 0, children: 2)",
+            "  Archaebacteria (Bacteria) (used: 0, children: 0)",
+            "  Eubacteria (Bacteria) (used: 0, children: 0)",
+            "Eukaryota (None) (used: 1, children: 5 + 8)",
+            "  Animalia (Eukaryota) (used: 1, children: 7 + 1)",
+            "    Arthropoda (Animalia) (used: 0, children: 0)",
+            "    Chordata (Animalia) (used: 1, children: 1)",
+            "    Cnidaria (Animalia) (used: 0, children: 0)",
+            "    Ctenophora (Animalia) (used: 0, children: 0)",
+            "    Gastrotrich (Animalia) (used: 0, children: 0)",
+            "    Placozoa (Animalia) (used: 0, children: 0)",
+            "    Porifera (Animalia) (used: 0, children: 0)",
+            "  Fungi (Eukaryota) (used: 0, children: 0)",
+            "  Monera (Eukaryota) (used: 0, children: 0)",
+            "  Plantae (Eukaryota) (used: 0, children: 0)",
+            "  Protista (Eukaryota) (used: 0, children: 0)",
+        ]
+
+    def test_usage_count_multiple_objects_same_tag_deep(self) -> None:
+        """
+        AI/Claude4.6 generated via IntelliJ IDEA AI Assistant
+        When two distinct objects (e.g. seperate courses, modules, etc.) are tagged
+        with the same child tag, it should count 2 for that tag (and roll up 2
+        to ancestors). Each distinct object should contribute exactly 1 to the count.
+        """
+        api.tag_object("obj:1", self.taxonomy, [self.chordata.value])
+        api.tag_object("obj:2", self.taxonomy, [self.chordata.value])
+        result = pretty_format_tags(
+            self.taxonomy.get_filtered_tags(search_term="chordata", include_counts=True)
+        )
+        assert result == [
+            "Eukaryota (None) (used: 2, children: 1 + 1)",
+            "  Animalia (Eukaryota) (used: 2, children: 1)",
+            "    Chordata (Animalia) (used: 2, children: 0)",
+        ]
+
+    def test_usage_count_sibling_tags_same_object_deduplication_deep(self) -> None:
+        """
+        AI/Claude4.6 generated via IntelliJ IDEA AI Assistant
+        When one object is tagged with two sibling tags (both children of the same
+        parent), the parent's usage_count should be 1, not 2. It should de-duplicate.
+        """
+        self.taxonomy.allow_multiple = True
+        self.taxonomy.save()
+        # Eubacteria and Archaebacteria are both children of Bacteria
+        api.tag_object("obj:1", self.taxonomy, [self.eubacteria.value, self.archaebacteria.value])
+        result = pretty_format_tags(
+            self.taxonomy.get_filtered_tags(search_term="bacteria", include_counts=True)
+        )
+        assert result == [
+            "Bacteria (None) (used: 1, children: 2)",
+            "  Archaebacteria (Bacteria) (used: 1, children: 0)",
+            "  Eubacteria (Bacteria) (used: 1, children: 0)",
+        ]
+
+    def test_usage_count_sibling_tags_different_objects_deep(self) -> None:
+        """
+        AI/Claude4.6 generated via IntelliJ IDEA AI Assistant
+        When two different objects are each tagged with a different sibling tag,
+        the parent's usage_count should be 2, not 1.
+        """
+        api.tag_object("obj:1", self.taxonomy, [self.eubacteria.value])
+        api.tag_object("obj:2", self.taxonomy, [self.archaebacteria.value])
+        result = pretty_format_tags(
+            self.taxonomy.get_filtered_tags(search_term="bacteria", include_counts=True)
+        )
+        assert result == [
+            "Bacteria (None) (used: 2, children: 2)",
+            "  Archaebacteria (Bacteria) (used: 1, children: 0)",
+            "  Eubacteria (Bacteria) (used: 1, children: 0)",
+        ]
+
+    def test_usage_count_one_level_root_tags(self) -> None:
+        """
+        AI/Claude4.6 generated via IntelliJ IDEA AI Assistant
+        _get_filtered_tags_one_level (depth=1) with include_counts=True should
+        reflect the rolled-up usage count, not just direct usage.
+        Tagging an object with a child tag should increment the root tag's count.
+        """
+        api.tag_object("obj:1", self.taxonomy, [self.eubacteria.value])  # child of Bacteria
+        result = pretty_format_tags(
+            self.taxonomy.get_filtered_tags(depth=1, include_counts=True)
+        )
+        assert result == [
+            "Archaea (None) (used: 0, children: 3)",
+            "Bacteria (None) (used: 1, children: 2)",
+            "Eukaryota (None) (used: 0, children: 5 + 8)",
+        ]
+
+    def test_usage_count_one_level_child_tags(self) -> None:
+        """
+        AI/Claude4.6 generated via IntelliJ IDEA AI Assistant
+        When listing children of a tag (depth=1, parent_tag_value=...), the
+        usage_count of each child should only reflect the objects tagged with
+        that child or any of its descendants.
+        """
+        api.tag_object("obj:1", self.taxonomy, [self.mammalia.value])  # grandchild of Animalia via Chordata
+        api.tag_object("obj:2", self.taxonomy, [self.chordata.value])  # direct child of Animalia
+        result = pretty_format_tags(
+            self.taxonomy.get_filtered_tags(depth=1, parent_tag_value="Animalia", include_counts=True)
+        )
+        assert result == [
+            "    Arthropoda (Animalia) (used: 0, children: 0)",
+            "    Chordata (Animalia) (used: 2, children: 1)",
+            "    Cnidaria (Animalia) (used: 0, children: 0)",
+            "    Ctenophora (Animalia) (used: 0, children: 0)",
+            "    Gastrotrich (Animalia) (used: 0, children: 0)",
+            "    Placozoa (Animalia) (used: 0, children: 0)",
+            "    Porifera (Animalia) (used: 0, children: 0)",
+        ]
+
+    def test_usage_count_three_levels_deep_rollup(self) -> None:
+        """
+        AI/Claude4.6 generated via IntelliJ IDEA AI Assistant
+        Tagging an object with a depth-3 tag (Chordata) should roll up
+        to grandparent (Animalia) and great-grandparent (Eukaryota),
+        verifying the full 3-level lineage query in add_counts_query.
+        """
+        api.tag_object("obj:1", self.taxonomy, [self.animalia.value])
+        api.tag_object("obj:1", self.taxonomy, [self.chordata.value])
+        result = pretty_format_tags(
+            self.taxonomy.get_filtered_tags(search_term="chordata", include_counts=True)
+        )
+        assert result == [
+            "Eukaryota (None) (used: 1, children: 1 + 1)",
+            "  Animalia (Eukaryota) (used: 1, children: 1)",
+            "    Chordata (Animalia) (used: 1, children: 0)",
+        ]
+
+    def test_usage_count_returns_zero_not_none_deep(self) -> None:
+        """
+        AI/Claude4.6 generated via IntelliJ IDEA AI Assistant
+        When no object has been tagged with a tag or any of its
+        descendants, usage_count must be 0 (integer), not None.
+        """
+        result = pretty_format_tags(self.taxonomy.get_filtered_tags(include_counts=True))
+        assert result == [
+            "Archaea (None) (used: 0, children: 3)",
+            "  DPANN (Archaea) (used: 0, children: 0)",
+            "  Euryarchaeida (Archaea) (used: 0, children: 0)",
+            "  Proteoarchaeota (Archaea) (used: 0, children: 0)",
+            "Bacteria (None) (used: 0, children: 2)",
+            "  Archaebacteria (Bacteria) (used: 0, children: 0)",
+            "  Eubacteria (Bacteria) (used: 0, children: 0)",
+            "Eukaryota (None) (used: 0, children: 5 + 8)",
+            "  Animalia (Eukaryota) (used: 0, children: 7 + 1)",
+            "    Arthropoda (Animalia) (used: 0, children: 0)",
+            "    Chordata (Animalia) (used: 0, children: 1)",
+            "    Cnidaria (Animalia) (used: 0, children: 0)",
+            "    Ctenophora (Animalia) (used: 0, children: 0)",
+            "    Gastrotrich (Animalia) (used: 0, children: 0)",
+            "    Placozoa (Animalia) (used: 0, children: 0)",
+            "    Porifera (Animalia) (used: 0, children: 0)",
+            "  Fungi (Eukaryota) (used: 0, children: 0)",
+            "  Monera (Eukaryota) (used: 0, children: 0)",
+            "  Plantae (Eukaryota) (used: 0, children: 0)",
+            "  Protista (Eukaryota) (used: 0, children: 0)",
+        ]
+
+    def test_usage_count_with_search_term_deep(self) -> None:
+        """
+        AI/Claude4.6 generated via IntelliJ IDEA AI Assistant
+        When using get_filtered_tags() with both a search_term and
+        include_counts=True, the usage_count returned should still
+        reflect the true count for each matching tag, not be affected
+        by the search filter.
+        """
+        api.tag_object("obj:1", self.taxonomy, [self.eubacteria.value])
+        api.tag_object("obj:2", self.taxonomy, [self.archaebacteria.value])
+        result = pretty_format_tags(
+            self.taxonomy.get_filtered_tags(search_term="bacteria", include_counts=True)
+        )
+        assert result == [
+            "Bacteria (None) (used: 2, children: 2)",
+            "  Archaebacteria (Bacteria) (used: 1, children: 0)",
+            "  Eubacteria (Bacteria) (used: 1, children: 0)",
+        ]
+
 
     def test_tree_sort(self) -> None:
         """
