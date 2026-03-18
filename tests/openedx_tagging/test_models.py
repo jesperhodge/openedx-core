@@ -614,6 +614,7 @@ class TestFilteredTagsClosedTaxonomy(TestTagTaxonomyMixin, TestCase):
             "  Animalia (Eukaryota) (used: 1, children: 7 + 1)",
             "    Arthropoda (Animalia) (used: 0, children: 0)",
             "    Chordata (Animalia) (used: 1, children: 1)",
+            "      Mammalia (Chordata) (used: 1, children: 0)",
             "    Cnidaria (Animalia) (used: 0, children: 0)",
             "    Ctenophora (Animalia) (used: 0, children: 0)",
             "    Gastrotrich (Animalia) (used: 0, children: 0)",
@@ -755,6 +756,7 @@ class TestFilteredTagsClosedTaxonomy(TestTagTaxonomyMixin, TestCase):
             "  Animalia (Eukaryota) (used: 0, children: 7 + 1)",
             "    Arthropoda (Animalia) (used: 0, children: 0)",
             "    Chordata (Animalia) (used: 0, children: 1)",
+            "      Mammalia (Chordata) (used: 0, children: 0)",
             "    Cnidaria (Animalia) (used: 0, children: 0)",
             "    Ctenophora (Animalia) (used: 0, children: 0)",
             "    Gastrotrich (Animalia) (used: 0, children: 0)",
@@ -783,6 +785,22 @@ class TestFilteredTagsClosedTaxonomy(TestTagTaxonomyMixin, TestCase):
             "Bacteria (None) (used: 2, children: 2)",
             "  Archaebacteria (Bacteria) (used: 1, children: 0)",
             "  Eubacteria (Bacteria) (used: 1, children: 0)",
+        ]
+
+    def test_usage_count_at_depth_3_rolls_up_to_root_level(self) -> None:
+        """
+        Tagging a tag at depth 3 should roll usage up through every ancestor level,
+        meaning that the root tag (depth 0) should include the usage count of the depth 3 tag.
+        """
+        api.tag_object("obj:1", self.taxonomy, [self.mammalia.value])
+        result = pretty_format_tags(
+            self.taxonomy.get_filtered_tags(search_term="mammalia", include_counts=True)
+        )
+        assert result == [
+            "Eukaryota (None) (used: 1, children: 1 + 2)",
+            "  Animalia (Eukaryota) (used: 1, children: 1 + 1)",
+            "    Chordata (Animalia) (used: 1, children: 1)",
+            "      Mammalia (Chordata) (used: 1, children: 0)",
         ]
 
 
