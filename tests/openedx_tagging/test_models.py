@@ -443,7 +443,8 @@ class TestFilteredTagsClosedTaxonomy(TestTagTaxonomyMixin, TestCase):
             "Eukaryota (None) (children: 5 + 8)",
             "  Animalia (Eukaryota) (children: 7 + 1)",
             "    Arthropoda (Animalia) (children: 0)",
-            "    Chordata (Animalia) (children: 1)",  # note this has a child but the child is not included
+            "    Chordata (Animalia) (children: 1)",
+            "      Mammalia (Chordata) (children: 0)",
             "    Cnidaria (Animalia) (children: 0)",
             "    Ctenophora (Animalia) (children: 0)",
             "    Gastrotrich (Animalia) (children: 0)",
@@ -622,7 +623,30 @@ class TestFilteredTagsClosedTaxonomy(TestTagTaxonomyMixin, TestCase):
             "Interests (None) (used: 0, children: 1 + 7)",
             "  Holland Codes (Interests) (used: 0, children: 1 + 6)",
             "    Interests - Holland Codes (Holland Codes) (used: 0, children: 6)",
+            "      Artistic (Interests - Holland Codes) (used: 0, children: 0)",
+            "      Conventional (Interests - Holland Codes) (used: 0, children: 0)",
+            "      Enterprising (Interests - Holland Codes) (used: 0, children: 0)",
+            "      Investigative (Interests - Holland Codes) (used: 0, children: 0)",
+            "      Realistic (Interests - Holland Codes) (used: 0, children: 0)",
+            "      Social (Interests - Holland Codes) (used: 0, children: 0)",
         ]
+
+    def test_parent_query_depth_limit(self) -> None:
+        """
+        Verify that filtering below a specific parent still respects the
+        taxonomy max supported depth from the root (depth <= 3).
+        """
+        taxonomy = api.create_taxonomy("Deep Parent Filter")
+        root = api.add_tag_to_taxonomy(taxonomy, "Root")
+        depth1 = api.add_tag_to_taxonomy(taxonomy, "Depth1", parent_tag_value=root.value)
+        depth2 = api.add_tag_to_taxonomy(taxonomy, "Depth2", parent_tag_value=depth1.value)
+        depth3 = api.add_tag_to_taxonomy(taxonomy, "Depth3", parent_tag_value=depth2.value)
+        api.add_tag_to_taxonomy(taxonomy, "Depth4", parent_tag_value=depth3.value)
+
+        result = list(taxonomy.get_filtered_tags(depth=None, parent_tag_value=depth1.value))
+        result_values = [row["value"] for row in result]
+
+        assert result_values == ["Depth2", "Depth3"]
 
 
 class TestFilteredTagsFreeTextTaxonomy(TestCase):
