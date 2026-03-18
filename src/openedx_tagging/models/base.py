@@ -530,12 +530,28 @@ class Taxonomy(models.Model):
         else:
             main_parent_id = None
 
+        qs: models.QuerySet =  self.tag_set.none()  # empty queryset
         assert TAXONOMY_MAX_DEPTH == 3  # If we change TAXONOMY_MAX_DEPTH we need to change this query code:
-        qs: models.QuerySet = self.tag_set.filter(
-            Q(parent_id=main_parent_id) |
-            Q(parent__parent_id=main_parent_id) |
-            Q(parent__parent__parent_id=main_parent_id)
-        )
+
+        if (main_parent_id is not None):
+            # If we're starting from a specific parent tag, we only want to include tags that are descendants of that parent tag.
+            qs: models.QuerySet = self.tag_set.filter(
+                # Main tag at depth 0is not included in the results
+                Q(parent_id=main_parent_id) |  # Direct children of the parent tag at depth 1
+                Q(parent__parent_id=main_parent_id) |  # Grandchildren of the parent tag at depth 2
+                Q(parent__parent__parent_id=main_parent_id)  # Great-grandchildren of the parent tag at depth 3
+            )
+        else:
+            # If we're starting from the top, we want to include all tags up to the max depth.
+            qs: models.QuerySet = self.tag_set.filter(
+                Q(parent=None) |  # Root tags at depth 0
+                Q(parent__parent=None) |  # Children of root tags at depth 1
+                Q(parent__parent__parent=None) |  # Grandchildren of root tags at depth 2
+                Q(parent__parent__parent__parent=None)  # Great-grandchildren of root tags at depth 3
+            )
+
+        # Regardless of where we start, we only support tags up to TAXONOMY_MAX_DEPTH from the root.
+        qs = qs.filter(parent__parent__parent__parent=None)
 
         if search_term:
             # We need to do an additional query to find all the tags that match the search term, then limit the
