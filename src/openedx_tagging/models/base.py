@@ -9,8 +9,8 @@ from typing import List
 
 from django.core.exceptions import ValidationError
 from django.db import models
-from django.db.models import F, Q, Value
-from django.db.models.functions import Concat, Lower
+from django.db.models import Count, F, IntegerField, OuterRef, Q, Subquery, Value
+from django.db.models.functions import Coalesce, Concat, Lower
 from django.utils.functional import cached_property
 from django.utils.module_loading import import_string
 from django.utils.translation import gettext_lazy as _
@@ -25,6 +25,8 @@ log = logging.getLogger(__name__)
 
 
 # Maximum depth allowed for a hierarchical taxonomy's tree of tags.
+# Note: if this changes please check logic in this file for notes
+# about necessary changes
 TAXONOMY_MAX_DEPTH = 3
 
 # Ancestry of a given tag; the Tag.value fields of a given tag and its parents, starting from the root.
@@ -501,16 +503,7 @@ class Taxonomy(models.Model):
         qs = qs.values("value", "child_count", "descendant_count", "depth", "parent_value", "external_id", "_id")
         qs = qs.order_by("value")
         if include_counts:
-            # We need to include the count of how many times this tag is used to tag objects.
-            # You'd think we could just use:
-            #     qs = qs.annotate(usage_count=models.Count("objecttag__pk"))
-            # but that adds another join which starts creating a cross product and the children and usage_count become
-            # intertwined and multiplied with each other. So we use a subquery.
-            obj_tags = ObjectTag.objects.filter(tag_id=models.OuterRef("pk")).order_by().annotate(
-                # We need to use Func() to get Count() without GROUP BY - see https://stackoverflow.com/a/69031027
-                count=models.Func(F('id'), function='Count')
-            )
-            qs = qs.annotate(usage_count=models.Subquery(obj_tags.values('count')))
+            qs = self.add_counts_query(qs)
         return qs  # type: ignore[return-value]
 
     def _get_filtered_tags_deep(
@@ -609,13 +602,49 @@ class Taxonomy(models.Model):
         qs = qs.values("value", "child_count", "descendant_count", "depth", "parent_value", "external_id", "_id")
         qs = qs.order_by("sort_key")
         if include_counts:
-            # Including the counts is a bit tricky; see the comment above in _get_filtered_tags_one_level()
-            obj_tags = ObjectTag.objects.filter(tag_id=models.OuterRef("pk")).order_by().annotate(
-                # We need to use Func() to get Count() without GROUP BY - see https://stackoverflow.com/a/69031027
-                count=models.Func(F('id'), function='Count')
-            )
-            qs = qs.annotate(usage_count=models.Subquery(obj_tags.values('count')))
+            qs = self.add_counts_query(qs)
+
         return qs  # type: ignore[return-value]
+
+    def add_counts_query(self, qs: models.QuerySet ):
+        # Adds a subquery to the passed-in queryset that returns the number
+        # of times a tag has been used.
+        #
+        # Note: The count is not a simple count, we need to do a 'roll up'
+        # where we count the number of times a tag is directly used and applied,
+        # but then that also needs to add a "1" count to the lineage tags
+        # (parent, grandparent, etc.), but de-duplicate counts for any children
+        # so that if we have "2" child tags, it only counts towards "1" for the
+        # parent.
+        # This query gets the raw counts for each tag usage, gets the distinct
+        # usages (so de-duplicates counts) by actual application to an "Object"
+        # (library, course, course module, course section, etc.), which creates
+        # a count per tag, annotated to that particular tag from the passed-in
+        # queryset.
+        #
+        # Note: This only works with a tag lineage depth of "3" (the now
+        # current value of TAXONOMY_MAX_DEPTH), inclusive of 0, so 0...3
+        # if we change TAXONOMY_MAX_DEPTH this code will need to be updated.
+
+        assert TAXONOMY_MAX_DEPTH == 3  # If we change TAXONOMY_MAX_DEPTH we need to change this query code
+        usage_count_qs = ObjectTag.objects.filter(
+            Q(tag_id=OuterRef('pk')) |
+            Q(tag__parent_id=OuterRef('pk')) |
+            Q(tag__parent__parent_id=OuterRef('pk')) |
+            Q(tag__parent__parent__parent_id=OuterRef('pk'))
+        ).values('object_id').distinct().annotate(
+            intermediate_grouping=Value(1, output_field=IntegerField())
+        ).values('intermediate_grouping').annotate(
+            total_usage=Count('object_id', distinct=True)
+        ).values('total_usage')
+
+        qs = qs.annotate(
+            usage_count=Coalesce(
+                Subquery(usage_count_qs, output_field=IntegerField()),
+                0  # Coalesce ensures we return 0 instead of None if there are no usages
+            )
+        )
+        return qs
 
     def add_tag(
         self,
