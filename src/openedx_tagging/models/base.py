@@ -549,7 +549,7 @@ class Taxonomy(models.Model):
 
         assert TAXONOMY_MAX_DEPTH == 3  # If we change TAXONOMY_MAX_DEPTH we need to change this query code:
 
-        qs = self.tag_set.filter(self._max_depth_filter())
+        qs: models.QuerySet = self.tag_set.filter(self._max_depth_filter())
 
         # If a main parent is specified, we only want to include its descendants, otherwise, all tags.
         if main_parent_id is not None:
@@ -569,7 +569,7 @@ class Taxonomy(models.Model):
                     if pk is not None:
                         matching_ids.append(pk)
             qs = qs.filter(pk__in=matching_ids)
-            qs = qs.annotate(
+            qs = qs.annotate(  # type: ignore[no-redef]
                 child_count=models.Count("children", filter=Q(children__pk__in=matching_ids), distinct=True),
                 grandchild_count=models.Count(
                     "children__children", filter=Q(children__children__pk__in=matching_ids), distinct=True,
@@ -579,17 +579,21 @@ class Taxonomy(models.Model):
                     filter=Q(children__children__children__pk__in=matching_ids),
                 ),
             )
-            qs = qs.annotate(descendant_count=F("child_count") + F("grandchild_count") + F("great_grandchild_count"))
+            qs = qs.annotate(  # type: ignore[no-redef]
+                descendant_count=F("child_count") + F("grandchild_count") + F("great_grandchild_count")
+            )
         elif excluded_values:
             raise NotImplementedError("Using excluded_values without search_term is not currently supported.")
             # We could implement this in the future but I'd prefer to get rid of the "excluded_values" API altogether.
             # It remains to be seen if it's useful to do that on the backend, or if we can do it better/simpler on the
             # frontend.
         else:
-            qs = qs.annotate(child_count=models.Count("children", distinct=True))
+            qs = qs.annotate(child_count=models.Count("children", distinct=True))  # type: ignore[no-redef]
             qs = qs.annotate(grandchild_count=models.Count("children__children", distinct=True))
             qs = qs.annotate(great_grandchild_count=models.Count("children__children__children"))
-            qs = qs.annotate(descendant_count=F("child_count") + F("grandchild_count") + F("great_grandchild_count"))
+            qs = qs.annotate(  # type: ignore[no-redef]
+                descendant_count=F("child_count") + F("grandchild_count") + F("great_grandchild_count")
+            )
 
         # Add the "depth" to each tag:
         qs = Tag.annotate_depth(qs)
