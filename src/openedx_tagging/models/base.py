@@ -513,7 +513,7 @@ class Taxonomy(models.Model):
             qs = qs.annotate(usage_count=models.Subquery(obj_tags.values('count')))
         return qs  # type: ignore[return-value]
 
-    def _filter_by_descendant_tags(self, tag_id: int, qs: models.QuerySet) -> models.QuerySet:
+    def _descendants_filter(self, tag_id: int) -> Q:
         """
         Helper function to get all descendant tags of a given parent tag
         up to the supported maximum depth.
@@ -521,17 +521,17 @@ class Taxonomy(models.Model):
         children = Q(parent_id=tag_id)
         grandchildren = Q(parent__parent_id=tag_id)
         great_grandchildren = Q(parent__parent__parent_id=tag_id)
-        return qs.filter(
+        return (
             children |
             grandchildren |
             great_grandchildren
         )
 
-    def _filter_by_max_depth(self, qs: models.QuerySet) -> models.QuerySet:
+    def _max_depth_filter(self) -> Q:
         """
         Helper function to get all tags up to the supported maximum depth.
         """
-        return qs.filter(Q(parent__parent__parent__parent_id=None))
+        return Q(parent__parent__parent__parent_id=None)
 
     def _get_filtered_tags_deep(
         self,
@@ -547,15 +547,13 @@ class Taxonomy(models.Model):
         # All tags (possibly below a certain tag?) in the closed taxonomy, up to depth TAXONOMY_MAX_DEPTH
         main_parent_id = self.tag_for_value(parent_tag_value).pk if parent_tag_value else None
 
-        qs: models.QuerySet = self.tag_set
-
         assert TAXONOMY_MAX_DEPTH == 3  # If we change TAXONOMY_MAX_DEPTH we need to change this query code:
+
+        qs = self.tag_set.filter(self._max_depth_filter())
 
         # If a main parent is specified, we only want to include its descendants, otherwise, all tags.
         if main_parent_id is not None:
-            qs = self._filter_by_descendant_tags(tag_id=main_parent_id, qs=qs)
-
-        qs = self._filter_by_max_depth(qs)
+            qs = qs.filter(self._descendants_filter(tag_id=main_parent_id))
 
         if search_term:
             # We need to do an additional query to find all the tags that match the search term, then limit the
