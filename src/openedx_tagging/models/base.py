@@ -519,6 +519,7 @@ class Taxonomy(models.Model):
         Helper function to get all descendant tags of a given parent tag
         up to the supported maximum depth.
         """
+        assert TAXONOMY_MAX_DEPTH == 3  # If we change TAXONOMY_MAX_DEPTH we need to change this query code
         children = Q(parent_id=tag_id)
         grandchildren = Q(parent__parent_id=tag_id)
         great_grandchildren = Q(parent__parent__parent_id=tag_id)
@@ -532,6 +533,7 @@ class Taxonomy(models.Model):
         """
         Helper function to get all tags up to the supported maximum depth.
         """
+        assert TAXONOMY_MAX_DEPTH == 3  # If we change TAXONOMY_MAX_DEPTH we need to change this query code
         return Q(parent__parent__parent__parent_id=None)
 
     def _get_filtered_tags_deep(
@@ -547,8 +549,6 @@ class Taxonomy(models.Model):
         """
         # All tags (possibly below a certain tag?) in the closed taxonomy, up to depth TAXONOMY_MAX_DEPTH
         main_parent_id = self.tag_for_value(parent_tag_value).pk if parent_tag_value else None
-
-        assert TAXONOMY_MAX_DEPTH == 3  # If we change TAXONOMY_MAX_DEPTH we need to change this query code:
 
         qs: models.QuerySet = self.tag_set.filter(self._max_depth_filter())
 
