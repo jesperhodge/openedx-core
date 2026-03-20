@@ -147,7 +147,8 @@ class TestApiTagging(TestTagTaxonomyMixin, TestCase):
             "Eukaryota (children: 5 + 8)",
             "  Animalia (children: 7 + 1)",
             "    Arthropoda (children: 0)",
-            "    Chordata (children: 1)",  # The child of this is excluded due to depth limit
+            "    Chordata (children: 1)",
+            "      Mammalia (children: 0)",
             "    Cnidaria (children: 0)",
             "    Ctenophora (children: 0)",
             "    Gastrotrich (children: 0)",
@@ -784,11 +785,12 @@ class TestApiTagging(TestTagTaxonomyMixin, TestCase):
             "Bacteria (used: 0, children: 2)",
             "  Archaebacteria (used: 1, children: 0)",
             "  Eubacteria (used: 0, children: 0)",
-            "Eukaryota (used: 0, children: 4 + 7)",
-            "  Animalia (used: 1, children: 7)",
+            "Eukaryota (used: 0, children: 4 + 8)",
+            "  Animalia (used: 1, children: 7 + 1)",
             "    Arthropoda (used: 1, children: 0)",
-            "    Chordata (used: 0, children: 0)",  # <<< Chordata has a matching child but we only support searching
-            "    Cnidaria (used: 0, children: 0)",  # 3 levels deep at once for now.
+            "    Chordata (used: 0, children: 1)",
+            "      Mammalia (used: 0, children: 0)",
+            "    Cnidaria (used: 0, children: 0)",
             "    Ctenophora (used: 0, children: 0)",
             "    Gastrotrich (used: 1, children: 0)",
             "    Placozoa (used: 1, children: 0)",

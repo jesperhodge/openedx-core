@@ -150,7 +150,8 @@ class Tag(models.Model):
     def annotate_depth(qs: models.QuerySet) -> models.QuerySet:
         """
         Given a query that loads Tag objects, annotate it with the depth of
-        each tag.
+        each tag. Depth is 0-indexed: root tags have depth=0, their children have depth=1, and so on.
+        That means that a taxonomy consisting of 4 levels have depths 0, 1, 2, and 3.
         """
         return qs.annotate(depth=models.Case(
             models.When(parent_id=None, then=0),
