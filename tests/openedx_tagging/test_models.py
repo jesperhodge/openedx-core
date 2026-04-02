@@ -4,6 +4,8 @@ Test the tagging base models
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock, patch
+
 import ddt  # type: ignore[import]
 import pytest
 from django.contrib.auth import get_user_model
@@ -15,6 +17,7 @@ from django.test.testcases import TestCase
 from openedx_tagging import api
 from openedx_tagging.models import LanguageTaxonomy, ObjectTag, Tag, Taxonomy
 from openedx_tagging.models.utils import RESERVED_TAG_CHARS
+from openedx_tagging.tasks import emit_content_object_associations_changed_for_tag_task
 
 from .utils import pretty_format_tags
 
@@ -1133,3 +1136,48 @@ class TestTagLineage(TestCase):
         assert self.charlie.lineage == "Charlie\t"
         assert self.bob.depth == 1
         assert self.bob.lineage == "Charlie\tBob\t"
+
+    @patch("openedx_tagging.signal_handlers.emit_content_object_associations_changed_for_tag_task.delay")
+    def test_rename_updates_search_index(self, mock_task_delay) -> None:
+        """
+        Renaming a tag should enqueue an async task that emits
+        CONTENT_OBJECT_ASSOCIATIONS_CHANGED events.
+        """
+        ObjectTag.objects.create(
+            object_id="content-v1:org+course+run+type@unit+block@123",
+            taxonomy=self.alice.taxonomy,
+            tag=self.alice,
+        )
+
+        with self.captureOnCommitCallbacks(execute=True):
+            self.alice.value = "Alicia"
+            self.alice.save()
+
+        assert mock_task_delay.call_count == 1
+        assert mock_task_delay.call_args[1]['tag_id'] == self.alice.id
+
+    @patch("openedx_tagging.tasks.CONTENT_OBJECT_ASSOCIATIONS_CHANGED", new_callable=MagicMock)
+    def test_emit_content_object_associations_changed_for_tag_task(self, mock_signal) -> None:
+        """Task emits one CONTENT_OBJECT_ASSOCIATIONS_CHANGED event per associated object."""
+        first_object_id = "content-v1:org+course+run+type@unit+block@123"
+        second_object_id = "content-v1:org+course+run+type@unit+block@124"
+        ObjectTag.objects.create(
+            object_id=first_object_id,
+            taxonomy=self.alice.taxonomy,
+            tag=self.alice,
+        )
+        ObjectTag.objects.create(
+            object_id=second_object_id,
+            taxonomy=self.alice.taxonomy,
+            tag=self.alice,
+        )
+
+        emitted_events = emit_content_object_associations_changed_for_tag_task(self.alice.id)
+
+        assert emitted_events == 2
+        assert mock_signal.send_event.call_count == 2
+        emitted_object_ids = {
+            call.kwargs["content_object"].object_id
+            for call in mock_signal.send_event.call_args_list
+        }
+        assert emitted_object_ids == {first_object_id, second_object_id}

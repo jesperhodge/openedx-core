@@ -18,7 +18,9 @@ astroid==4.0.4
     #   pylint
     #   pylint-celery
 attrs==26.1.0
-    # via -r requirements/quality.txt
+    # via
+    #   -r requirements/quality.txt
+    #   openedx-events
 billiard==4.2.4
     # via
     #   -r requirements/quality.txt
@@ -44,11 +46,11 @@ cffi==2.0.0
     #   pynacl
 chardet==7.4.1
     # via diff-cover
-charset-normalizer==3.4.7
+charset-normalizer==3.4.6
     # via
     #   -r requirements/quality.txt
     #   requests
-click==8.3.2
+click==8.3.1
     # via
     #   -r requirements/pip-tools.txt
     #   -r requirements/quality.txt
@@ -94,7 +96,6 @@ cryptography==46.0.7
     # via
     #   -r requirements/quality.txt
     #   pyjwt
-    #   secretstorage
 ddt==1.7.2
     # via -r requirements/quality.txt
 diff-cover==10.2.0
@@ -124,11 +125,12 @@ django==5.2.13
     #   edx-drf-extensions
     #   edx-i18n-tools
     #   edx-organizations
+    #   openedx-events
 django-crum==0.7.9
     # via
     #   -r requirements/quality.txt
     #   edx-django-utils
-django-debug-toolbar==6.3.0
+django-debug-toolbar==6.2.0
     # via
     #   -r requirements/dev.in
     #   -r requirements/quality.txt
@@ -140,11 +142,11 @@ django-simple-history==3.11.0
     # via
     #   -r requirements/quality.txt
     #   edx-organizations
-django-stubs==6.0.2
+django-stubs==6.0.1
     # via
     #   -r requirements/quality.txt
     #   djangorestframework-stubs
-django-stubs-ext==6.0.2
+django-stubs-ext==6.0.1
     # via
     #   -r requirements/quality.txt
     #   django-stubs
@@ -159,7 +161,7 @@ djangorestframework==3.17.1
     #   drf-jwt
     #   edx-drf-extensions
     #   edx-organizations
-djangorestframework-stubs==3.16.9
+djangorestframework-stubs==3.16.8
     # via -r requirements/quality.txt
 dnspython==2.8.0
     # via
@@ -173,10 +175,15 @@ drf-jwt==1.19.2
     # via
     #   -r requirements/quality.txt
     #   edx-drf-extensions
+edx-ccx-keys==2.0.2
+    # via
+    #   -r requirements/quality.txt
+    #   openedx-events
 edx-django-utils==8.0.1
     # via
     #   -r requirements/quality.txt
     #   edx-drf-extensions
+    #   openedx-events
 edx-drf-extensions==10.6.0
     # via
     #   -r requirements/quality.txt
@@ -185,13 +192,19 @@ edx-i18n-tools==2.0.0
     # via -r requirements/dev.in
 edx-lint==6.0.0
     # via -r requirements/quality.txt
-edx-opaque-keys==4.0.0
+edx-opaque-keys[django]==4.0.0
     # via
     #   -r requirements/quality.txt
+    #   edx-ccx-keys
     #   edx-drf-extensions
     #   edx-organizations
+    #   openedx-events
 edx-organizations==8.0.0
     # via -r requirements/quality.txt
+fastavro==1.12.1
+    # via
+    #   -r requirements/quality.txt
+    #   openedx-events
 filelock==3.25.2
     # via
     #   -r requirements/ci.txt
@@ -234,11 +247,6 @@ jaraco-functools==4.4.0
     # via
     #   -r requirements/quality.txt
     #   keyring
-jeepney==0.9.0
-    # via
-    #   -r requirements/quality.txt
-    #   keyring
-    #   secretstorage
 jinja2==3.1.6
     # via
     #   -r requirements/quality.txt
@@ -285,7 +293,7 @@ more-itertools==11.0.2
     #   -r requirements/quality.txt
     #   jaraco-classes
     #   jaraco-functools
-mypy==1.20.0
+mypy==1.19.1
     # via -r requirements/quality.txt
 mypy-extensions==1.1.0
     # via
@@ -297,6 +305,8 @@ nh3==0.3.4
     # via
     #   -r requirements/quality.txt
     #   readme-renderer
+openedx-events==11.1.0
+    # via -r requirements/quality.txt
 packaging==26.0
     # via
     #   -r requirements/ci.txt
@@ -315,7 +325,7 @@ pathspec==1.0.4
     # via
     #   -r requirements/quality.txt
     #   mypy
-pillow==12.2.0
+pillow==12.1.1
     # via
     #   -r requirements/quality.txt
     #   edx-organizations
@@ -436,7 +446,7 @@ readme-renderer==44.0
     # via
     #   -r requirements/quality.txt
     #   twine
-requests==2.33.1
+requests==2.33.0
     # via
     #   -r requirements/quality.txt
     #   edx-drf-extensions
@@ -457,10 +467,6 @@ rich==15.0.0
     #   twine
 rules==3.5
     # via -r requirements/quality.txt
-secretstorage==3.5.0
-    # via
-    #   -r requirements/quality.txt
-    #   keyring
 semantic-version==2.10.0
     # via
     #   -r requirements/quality.txt
@@ -468,6 +474,7 @@ semantic-version==2.10.0
 six==1.17.0
     # via
     #   -r requirements/quality.txt
+    #   edx-ccx-keys
     #   edx-lint
     #   python-dateutil
 snowballstemmer==3.0.1
@@ -516,7 +523,7 @@ typing-extensions==4.15.0
     #   grimp
     #   import-linter
     #   mypy
-tzdata==2026.1
+tzdata==2025.3
     # via
     #   -r requirements/quality.txt
     #   kombu

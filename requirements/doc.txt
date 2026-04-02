@@ -17,7 +17,9 @@ asgiref==3.11.1
     #   -r requirements/test.txt
     #   django
 attrs==26.1.0
-    # via -r requirements/test.txt
+    # via
+    #   -r requirements/test.txt
+    #   openedx-events
 babel==2.18.0
     # via
     #   pydata-sphinx-theme
@@ -39,11 +41,11 @@ cffi==2.0.0
     #   -r requirements/test.txt
     #   cryptography
     #   pynacl
-charset-normalizer==3.4.7
+charset-normalizer==3.4.6
     # via
     #   -r requirements/test.txt
     #   requests
-click==8.3.2
+click==8.3.1
     # via
     #   -r requirements/test.txt
     #   celery
@@ -93,12 +95,13 @@ django==5.2.13
     #   edx-django-utils
     #   edx-drf-extensions
     #   edx-organizations
+    #   openedx-events
     #   sphinxcontrib-django
 django-crum==0.7.9
     # via
     #   -r requirements/test.txt
     #   edx-django-utils
-django-debug-toolbar==6.3.0
+django-debug-toolbar==6.2.0
     # via -r requirements/test.txt
 django-model-utils==5.0.0
     # via
@@ -108,11 +111,11 @@ django-simple-history==3.11.0
     # via
     #   -r requirements/test.txt
     #   edx-organizations
-django-stubs==6.0.2
+django-stubs==6.0.1
     # via
     #   -r requirements/test.txt
     #   djangorestframework-stubs
-django-stubs-ext==6.0.2
+django-stubs-ext==6.0.1
     # via
     #   -r requirements/test.txt
     #   django-stubs
@@ -127,7 +130,7 @@ djangorestframework==3.17.1
     #   drf-jwt
     #   edx-drf-extensions
     #   edx-organizations
-djangorestframework-stubs==3.16.9
+djangorestframework-stubs==3.16.8
     # via -r requirements/test.txt
 dnspython==2.8.0
     # via
@@ -146,21 +149,32 @@ drf-jwt==1.19.2
     # via
     #   -r requirements/test.txt
     #   edx-drf-extensions
+edx-ccx-keys==2.0.2
+    # via
+    #   -r requirements/test.txt
+    #   openedx-events
 edx-django-utils==8.0.1
     # via
     #   -r requirements/test.txt
     #   edx-drf-extensions
+    #   openedx-events
 edx-drf-extensions==10.6.0
     # via
     #   -r requirements/test.txt
     #   edx-organizations
-edx-opaque-keys==4.0.0
+edx-opaque-keys[django]==4.0.0
     # via
     #   -r requirements/test.txt
+    #   edx-ccx-keys
     #   edx-drf-extensions
     #   edx-organizations
+    #   openedx-events
 edx-organizations==8.0.0
     # via -r requirements/test.txt
+fastavro==1.12.1
+    # via
+    #   -r requirements/test.txt
+    #   openedx-events
 freezegun==1.5.5
     # via -r requirements/test.txt
 grimp==3.14
@@ -206,7 +220,7 @@ mdurl==0.1.2
     #   markdown-it-py
 mock==5.2.0
     # via -r requirements/test.txt
-mypy==1.20.0
+mypy==1.19.1
     # via -r requirements/test.txt
 mypy-extensions==1.1.0
     # via
@@ -216,6 +230,8 @@ mysqlclient==2.2.8
     # via -r requirements/test.txt
 nh3==0.3.4
     # via readme-renderer
+openedx-events==11.1.0
+    # via -r requirements/test.txt
 packaging==26.0
     # via
     #   -r requirements/test.txt
@@ -226,7 +242,7 @@ pathspec==1.0.4
     # via
     #   -r requirements/test.txt
     #   mypy
-pillow==12.2.0
+pillow==12.1.1
     # via
     #   -r requirements/test.txt
     #   edx-organizations
@@ -298,7 +314,7 @@ pyyaml==6.0.3
     #   code-annotations
 readme-renderer==44.0
     # via -r requirements/doc.in
-requests==2.33.1
+requests==2.33.0
     # via
     #   -r requirements/test.txt
     #   edx-drf-extensions
@@ -320,6 +336,7 @@ semantic-version==2.10.0
 six==1.17.0
     # via
     #   -r requirements/test.txt
+    #   edx-ccx-keys
     #   python-dateutil
 snowballstemmer==3.0.1
     # via sphinx
@@ -382,7 +399,7 @@ typing-extensions==4.15.0
     #   import-linter
     #   mypy
     #   pydata-sphinx-theme
-tzdata==2026.1
+tzdata==2025.3
     # via
     #   -r requirements/test.txt
     #   kombu
