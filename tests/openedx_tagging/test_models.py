@@ -1133,3 +1133,14 @@ class TestTagLineage(TestCase):
         assert self.charlie.lineage == "Charlie\t"
         assert self.bob.depth == 1
         assert self.bob.lineage == "Charlie\tBob\t"
+
+    def test_rename_updates_search_index(self):
+        """
+        There will be a post-update event. This will emit
+        a django signal CONTENT_OBJECT_ASSOCIATIONS_CHANGED.
+        Test that that signal has been emitted after update.
+        """
+        with self.assertLogs("openedx_tagging.signal_handlers", level="INFO") as logs:
+            self.alice.value = "Alicia"
+            self.alice.save()
+        assert any("Update signal called" in log for log in logs.output)
