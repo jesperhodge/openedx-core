@@ -5,6 +5,7 @@ Test the tagging base models
 from __future__ import annotations
 
 import ddt  # type: ignore[import]
+from mock import MagicMock, patch
 import pytest
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
@@ -1134,13 +1135,23 @@ class TestTagLineage(TestCase):
         assert self.bob.depth == 1
         assert self.bob.lineage == "Charlie\tBob\t"
 
-    def test_rename_updates_search_index(self):
+    # Mock CONTENT_OBJECT_ASSOCIATIONS_CHANGED signal handler to check that it is called after renaming a tag
+    @patch("openedx_tagging.signal_handlers.CONTENT_OBJECT_ASSOCIATIONS_CHANGED", new_callable=MagicMock)
+    def test_rename_updates_search_index(self, mock_signal) -> None:
         """
         There will be a post-update event. This will emit
         a django signal CONTENT_OBJECT_ASSOCIATIONS_CHANGED.
         Test that that signal has been emitted after update.
         """
+        ObjectTag.objects.create(
+            object_id="content-v1:org+course+run+type@unit+block@123",
+            taxonomy=self.alice.taxonomy,
+            tag=self.alice,
+        )
+
         with self.assertLogs("openedx_tagging.signal_handlers", level="INFO") as logs:
             self.alice.value = "Alicia"
             self.alice.save()
-        assert any("Update signal called" in log for log in logs.output)
+
+        # assert that mock_signal_send was called once
+        assert mock_signal.send_event.call_count == 1
