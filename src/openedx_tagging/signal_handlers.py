@@ -25,7 +25,7 @@ def _update_object_tags_in_search_index(tag):
         CONTENT_OBJECT_ASSOCIATIONS_CHANGED.send_event(
             content_object=ContentObjectChangedData(
                 object_id=object_id,
-                changes=["collections"],
+                changes=["tags"],
             ),
         )
 

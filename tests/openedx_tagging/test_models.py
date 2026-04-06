@@ -1155,3 +1155,4 @@ class TestTagLineage(TestCase):
 
         # assert that mock_signal_send was called once
         assert mock_signal.send_event.call_count == 1
+        assert mock_signal.send_event.call_args[1]['content_object'].object_id == "content-v1:org+course+run+type@unit+block@123"
