@@ -1,19 +1,19 @@
-from django.dispatch import receiver
-from django.db.models.signals import post_save
-
-from openedx_tagging.models.base import ObjectTag, Tag
-from openedx_events.content_authoring.signals import (
-    CONTENT_OBJECT_ASSOCIATIONS_CHANGED,
-)
-from openedx_events.content_authoring.data import (
-    ContentObjectChangedData,
-)
+"""Signal handlers for tagging-related model updates."""
 
 import logging
 
+from django.db.models.signals import post_save
+from django.dispatch import receiver
+from openedx_events.content_authoring.data import ContentObjectChangedData  # type: ignore[import-untyped]
+from openedx_events.content_authoring.signals import CONTENT_OBJECT_ASSOCIATIONS_CHANGED  # type: ignore[import-untyped]
+
+from openedx_tagging.models.base import ObjectTag, Tag
+
 logger = logging.getLogger(__name__)
 
+
 def _update_object_tags_in_search_index(tag):
+    """Emit content association change events for all objects linked to `tag`."""
     # find object tags that are associated with the tag
     object_tags = ObjectTag.objects.filter(tag=tag)
     object_ids = object_tags.values_list("object_id", flat=True)
@@ -29,8 +29,9 @@ def _update_object_tags_in_search_index(tag):
             ),
         )
 
+
 @receiver(post_save, sender=Tag)
-def tag_post_save(sender, instance, created, **kwargs):
+def tag_post_save(_sender, instance, created, **kwargs):
     """
     If a tag is updated, it will be updated in the search index.
     """

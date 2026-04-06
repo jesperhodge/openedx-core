@@ -20,4 +20,4 @@ class TaggingConfig(AppConfig):
 
     def ready(self):
         # Import signal handlers so Django registers all @receiver callbacks.
-        from . import signal_handlers  # pylint: disable=unused-import
+        from . import signal_handlers  # pylint: disable=unused-import,import-outside-toplevel

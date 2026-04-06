@@ -4,8 +4,9 @@ Test the tagging base models
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock, patch
+
 import ddt  # type: ignore[import]
-from mock import MagicMock, patch
 import pytest
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
@@ -1149,10 +1150,13 @@ class TestTagLineage(TestCase):
             tag=self.alice,
         )
 
-        with self.assertLogs("openedx_tagging.signal_handlers", level="INFO") as logs:
+        with self.assertLogs("openedx_tagging.signal_handlers", level="INFO"):
             self.alice.value = "Alicia"
             self.alice.save()
 
         # assert that mock_signal_send was called once
         assert mock_signal.send_event.call_count == 1
-        assert mock_signal.send_event.call_args[1]['content_object'].object_id == "content-v1:org+course+run+type@unit+block@123"
+        assert (
+            mock_signal.send_event.call_args[1]["content_object"].object_id
+            == "content-v1:org+course+run+type@unit+block@123"
+        )
