@@ -83,7 +83,7 @@ edx-drf-extensions==10.6.0
     # via
     #   -r requirements/base.in
     #   edx-organizations
-edx-opaque-keys==4.0.0
+edx-opaque-keys[django]==4.0.0
     # via
     #   edx-ccx-keys
     #   edx-drf-extensions

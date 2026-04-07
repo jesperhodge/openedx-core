@@ -31,11 +31,13 @@ def _update_object_tags_in_search_index(tag):
 
 
 @receiver(post_save, sender=Tag)
-def tag_post_save(_sender, instance, created, **kwargs):
+def tag_post_save(sender, **kwargs):  # pylint: disable=unused-argument
     """
     If a tag is updated, it will be updated in the search index.
     """
-    if created:
+    instance = kwargs.get("instance", None)
+
+    if kwargs.get("created", False):
         return
     else:
         _update_object_tags_in_search_index(tag=instance)

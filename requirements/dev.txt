@@ -192,7 +192,7 @@ edx-i18n-tools==2.0.0
     # via -r requirements/dev.in
 edx-lint==6.0.0
     # via -r requirements/quality.txt
-edx-opaque-keys==4.0.0
+edx-opaque-keys[django]==4.0.0
     # via
     #   -r requirements/quality.txt
     #   edx-ccx-keys
