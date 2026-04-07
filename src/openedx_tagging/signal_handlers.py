@@ -18,8 +18,13 @@ def _update_object_tags_in_search_index(tag):
     object_tags = ObjectTag.objects.filter(tag=tag)
     object_ids = object_tags.values_list("object_id", flat=True)
 
+    log_message = (
+        f"Tag with id {tag.id} was updated. "
+        f"Emitting CONTENT_OBJECT_ASSOCIATIONS_CHANGED events for associated object_ids: {list(object_ids)}"
+    )
+    logger.info(log_message)
+
     for object_id in object_ids:
-        logger.info("Updating search index for object_id: %s due to tag update: %s", object_id, tag.value)
         # .. event_implemented_name: CONTENT_OBJECT_ASSOCIATIONS_CHANGED
         # .. event_type: org.openedx.content_authoring.content.object.associations.changed.v1
         CONTENT_OBJECT_ASSOCIATIONS_CHANGED.send_event(
