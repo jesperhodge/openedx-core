@@ -4,9 +4,11 @@ Tests tagging rest api views
 from __future__ import annotations
 
 import json
+from unittest.mock import patch
 from urllib.parse import parse_qs, quote_plus, urlparse
 
 import ddt  # type: ignore[import]
+from django.db import IntegrityError
 import rules
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -2172,6 +2174,122 @@ class TestTaxonomyTagsView(TestTaxonomyViewMixin):
         self.assertEqual(data.get("value"), updated_tag_value_2)
         self.assertEqual(data.get("parent_value"), existing_tag.parent)
         self.assertEqual(data.get("external_id"), existing_tag.external_id)
+
+    def test_update_tag_with_duplicate_value(self):
+        self.client.force_authenticate(user=self.staff)
+        updated_tag_value = "Updated Tag"
+
+        # Existing Tag that will be updated
+        existing_tag = self.small_taxonomy.tag_set.filter(parent=None).first()
+
+        # Create another tag with the value that we will try to update to, to cause a duplicate value scenario
+        Tag.objects.create(
+            value=updated_tag_value,
+            taxonomy=self.small_taxonomy,
+            parent=None
+        )
+
+        update_data = {
+            "tag": existing_tag.value,
+            "updated_tag_value": updated_tag_value
+        }
+
+
+        response = self.client.put(
+            self.small_taxonomy_url, update_data, format="json"
+        )
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        # Check that the error message indicates the duplicate value issue
+        self.assertIn("Tag with this value already exists in this taxonomy", str(response.data))
+
+        response = self.client.patch(
+            self.small_taxonomy_url, update_data, format="json"
+        )
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        # Check that the error message indicates the duplicate value issue
+        self.assertIn("Tag with this value already exists in this taxonomy", str(response.data))
+
+    def test_should_sanitize_input(self):
+        """
+        Test that when creating, updating, patching, or deleting tags,
+        the input is sanitized to prevent any sort of malicious input
+        (like XSS, SQL injection, etc.).
+        """
+        # TODO: Implement
+        pass
+
+    def test_should_handle_unexpected_errors_gracefully(self):
+        """
+        Test that if any unexpected error occurs during the processing of the request,
+        the API handles it gracefully and returns a 500 error with a helpful error message,
+        instead of crashing or exposing any sensitive information.
+        For example, if there is an IntegrityError, this is handled gracefully and returns a generic 500 error.
+        """
+        self.client.force_authenticate(user=self.staff)
+
+        def put_request(update_data):
+            return self.client.put(
+                self.small_taxonomy_url, update_data, format="json"
+            )
+
+        def patch_request(update_data):
+            return self.client.patch(
+                self.small_taxonomy_url, update_data, format="json"
+            )
+
+        def post_request(create_data):
+            return self.client.post(
+                self.small_taxonomy_url, create_data, format="json"
+            )
+
+        def delete_request(delete_data):
+            return self.client.delete(
+                self.small_taxonomy_url, delete_data, format="json"
+            )
+
+        def prepare_data_for_existing_tag():
+            existing_tag = self.small_taxonomy.tag_set.filter(parent=None).first()
+            update_data = {
+                "tag": existing_tag.value,
+                "updated_tag_value": "Updated Tag"
+            }
+            create_data = {
+                "tag": "New Tag",
+                "parent_tag_value": existing_tag.value
+            }
+            delete_data = {
+                "tags": [existing_tag.value],
+                "with_subtags": True
+            }
+            return update_data, create_data, delete_data
+
+        def assert_generic_500_response(response):
+            assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+            self.assertIn("An unexpected error occurred while processing the request.", str(response.data))
+
+        # To simulate an unexpected error, we can mock the Tag.objects.filter() method to raise an exception
+        with patch("tagging.models.Tag.objects.filter") as mock_filter:
+            mock_filter.side_effect = Exception("Unexpected error")
+
+            # Now when we try to update a tag, it will raise the unexpected error
+            update_data, create_data, delete_data = prepare_data_for_existing_tag()
+
+
+            response = put_request(update_data)
+
+            assert_generic_500_response(response)
+
+        # Simulate an IntegrityError when updating a tag
+        with patch("tagging.models.Tag.objects.filter") as mock_filter:
+            mock_filter.side_effect = IntegrityError("Integrity error")
+
+            update_data, create_data, delete_data = prepare_data_for_existing_tag()
+
+            response = put_request(update_data)
+
+            assert_generic_500_response(response)
 
     def test_update_tag_in_taxonomy_reflects_changes_in_object_tags(self):
         self.client.force_authenticate(user=self.staff)
