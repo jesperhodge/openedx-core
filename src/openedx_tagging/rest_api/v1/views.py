@@ -775,6 +775,9 @@ class TaxonomyTagsView(ListAPIView, RetrieveUpdateDestroyAPIView):
         super().__init__(*args, **kwargs)
         self._taxonomy = None
 
+    def get_exception_handler(self):
+        return exception_handler
+
     def get_taxonomy(self) -> Taxonomy:
         """
         Get the taxonomy from `pk` or raise 404.
