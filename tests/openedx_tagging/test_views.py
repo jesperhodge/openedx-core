@@ -2229,6 +2229,11 @@ class TestTaxonomyTagsView(TestTaxonomyViewMixin):
         """
         self.client.force_authenticate(user=self.staff)
 
+        def get_request(params):
+            return self.client.get(
+                self.small_taxonomy_url, params, format="json"
+            )
+
         def put_request(update_data):
             return self.client.put(
                 self.small_taxonomy_url, update_data, format="json"
@@ -2269,26 +2274,40 @@ class TestTaxonomyTagsView(TestTaxonomyViewMixin):
             assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
             self.assertIn("An unexpected error occurred while processing the request.", str(response.data))
 
-        # To simulate an unexpected error, we can mock the Tag.objects.filter() method to raise an exception
-        with patch("tagging.models.Tag.objects.filter") as mock_filter:
+        # Simulate a generic exception
+        with patch("openedx_tagging.models.Tag.objects.filter") as mock_filter:
             mock_filter.side_effect = Exception("Unexpected error")
 
-            # Now when we try to update a tag, it will raise the unexpected error
             update_data, create_data, delete_data = prepare_data_for_existing_tag()
 
-
             response = put_request(update_data)
-
             assert_generic_500_response(response)
 
-        # Simulate an IntegrityError when updating a tag
+            response = patch_request(update_data)
+            assert_generic_500_response(response)
+
+            response = post_request(create_data)
+            assert_generic_500_response(response)
+
+            response = delete_request(delete_data)
+            assert_generic_500_response(response)
+
+        # Simulate an IntegrityError
         with patch("tagging.models.Tag.objects.filter") as mock_filter:
             mock_filter.side_effect = IntegrityError("Integrity error")
 
             update_data, create_data, delete_data = prepare_data_for_existing_tag()
 
             response = put_request(update_data)
+            assert_generic_500_response(response)
 
+            response = patch_request(update_data)
+            assert_generic_500_response(response)
+
+            response = post_request(create_data)
+            assert_generic_500_response(response)
+
+            response = delete_request(delete_data)
             assert_generic_500_response(response)
 
     def test_update_tag_in_taxonomy_reflects_changes_in_object_tags(self):

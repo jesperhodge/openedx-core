@@ -34,6 +34,7 @@ from ...models import Tag, Taxonomy
 from ...rules import ObjectTagPermissionItem
 from ..paginators import MAX_FULL_DEPTH_THRESHOLD, DisabledTagsPagination, TagsPagination, TaxonomyPagination
 from ..utils import view_auth_classes
+from .exception_handlers import TaggingExceptionHandlerMixin
 from .permissions import ObjectTagObjectPermissions, TaxonomyObjectPermissions, TaxonomyTagsObjectPermissions
 from .serializers import (
     ObjectTagListQueryParamsSerializer,
@@ -55,7 +56,7 @@ from .serializers import (
 
 
 @view_auth_classes
-class TaxonomyView(ModelViewSet):
+class TaxonomyView(TaggingExceptionHandlerMixin, ModelViewSet):
     """
     View to list, create, retrieve, update, delete, export or import Taxonomies.
 
@@ -640,7 +641,7 @@ class ObjectTagCountsView(
 
 
 @view_auth_classes
-class TaxonomyTagsView(ListAPIView, RetrieveUpdateDestroyAPIView):
+class TaxonomyTagsView(TaggingExceptionHandlerMixin, ListAPIView, RetrieveUpdateDestroyAPIView):
     """
     View to list/create/update/delete tags of a taxonomy.
 
@@ -774,9 +775,6 @@ class TaxonomyTagsView(ListAPIView, RetrieveUpdateDestroyAPIView):
         """
         super().__init__(*args, **kwargs)
         self._taxonomy = None
-
-    def get_exception_handler(self):
-        return exception_handler
 
     def get_taxonomy(self) -> Taxonomy:
         """
