@@ -4,12 +4,15 @@ Tests tagging rest api views
 from __future__ import annotations
 
 import json
+from unittest.mock import patch
 from urllib.parse import parse_qs, quote_plus, urlparse
 
 import ddt  # type: ignore[import]
+from django.test import override_settings
 import rules
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db import IntegrityError
 from rest_framework import status
 from rest_framework.test import APITestCase
 
@@ -2172,6 +2175,127 @@ class TestTaxonomyTagsView(TestTaxonomyViewMixin):
         self.assertEqual(data.get("value"), updated_tag_value_2)
         self.assertEqual(data.get("parent_value"), existing_tag.parent)
         self.assertEqual(data.get("external_id"), existing_tag.external_id)
+
+    def test_update_tag_with_duplicate_value(self):
+        self.client.force_authenticate(user=self.staff)
+        updated_tag_value = "Updated Tag"
+
+        # Existing Tag that will be updated
+        existing_tag = self.small_taxonomy.tag_set.filter(parent=None).first()
+
+        # Create another tag with the value that we will try to update to, to cause a duplicate value scenario
+        Tag.objects.create(
+            value=updated_tag_value,
+            taxonomy=self.small_taxonomy,
+            parent=None
+        )
+
+        update_data = {
+            "tag": existing_tag.value,
+            "updated_tag_value": updated_tag_value
+        }
+
+        response = self.client.put(
+            self.small_taxonomy_url, update_data, format="json"
+        )
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        # Check that the error message indicates the duplicate value issue
+        assert "Tag value \"Updated Tag\" already exists in this taxonomy" in str(response.data)
+
+        response = self.client.patch(
+            self.small_taxonomy_url, update_data, format="json"
+        )
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        # Check that the error message indicates the duplicate value issue
+        assert "Tag value \"Updated Tag\" already exists in this taxonomy" in str(response.data)
+
+    def test_should_handle_unexpected_errors_gracefully(self):
+        """
+        Test that if any unexpected error occurs during the processing of the request,
+        the API converts it to a generic 500 response without exposing sensitive info.
+        For example, if there is an IntegrityError, this is handled gracefully and returns a generic 500 error.
+        """
+        self.client.force_authenticate(user=self.staff)
+        expected_error_message = "An unexpected error occurred while processing the request."
+        existing_tag = self.small_taxonomy.tag_set.filter(parent=None).first()
+        update_data = {
+            "tag": existing_tag.value,
+            "updated_tag_value": "Updated Tag"
+        }
+        create_data = {
+            "tag": "New Tag",
+            "parent_tag_value": existing_tag.value
+        }
+        delete_data = {
+            "tags": [existing_tag.value],
+            "with_subtags": True
+        }
+
+        # Simulate a generic exception in a method used across all verbs in this view.
+        with patch("openedx_tagging.rest_api.v1.views.TaxonomyTagsView.get_taxonomy") as mock_get_taxonomy:
+            mock_get_taxonomy.side_effect = Exception("Unexpected error")
+
+            response = self.client.get(self.small_taxonomy_url, {}, format="json")
+            assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+            assert expected_error_message in str(response.data)
+
+            response = self.client.put(self.small_taxonomy_url, update_data, format="json")
+            assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+            assert expected_error_message in str(response.data)
+
+            response = self.client.patch(self.small_taxonomy_url, update_data, format="json")
+            assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+            assert expected_error_message in str(response.data)
+
+            response = self.client.post(self.small_taxonomy_url, create_data, format="json")
+            assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+            assert expected_error_message in str(response.data)
+
+            response = self.client.delete(self.small_taxonomy_url, delete_data, format="json")
+            assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+            assert expected_error_message in str(response.data)
+
+        # Simulate an IntegrityError in the same shared method.
+        with patch("openedx_tagging.rest_api.v1.views.TaxonomyTagsView.get_taxonomy") as mock_get_taxonomy:
+            mock_get_taxonomy.side_effect = IntegrityError("Integrity error")
+
+            response = self.client.get(self.small_taxonomy_url, {}, format="json")
+            assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+            assert expected_error_message in str(response.data)
+
+            response = self.client.put(self.small_taxonomy_url, update_data, format="json")
+            assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+            assert expected_error_message in str(response.data)
+
+            response = self.client.patch(self.small_taxonomy_url, update_data, format="json")
+            assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+            assert expected_error_message in str(response.data)
+
+            response = self.client.post(self.small_taxonomy_url, create_data, format="json")
+            assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+            assert expected_error_message in str(response.data)
+
+            response = self.client.delete(self.small_taxonomy_url, delete_data, format="json")
+            assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+            assert expected_error_message in str(response.data)
+
+    def test_passes_stack_trace_upwards_when_settings_debug_true(self):
+        """
+        Test that when an unexpected error occurs, if we're in debug mode, the stack trace is included in the response
+        to help with debugging, instead of just a generic error message.
+        """
+        self.client.force_authenticate(user=self.staff)
+        # simulate debug mode by patching the settings.DEBUG value to True
+        with override_settings(DEBUG=True):
+            with patch("openedx_tagging.rest_api.v1.views.TaxonomyTagsView.get_taxonomy") as mock_get_taxonomy:
+                mock_get_taxonomy.side_effect = Exception("Specific error message")
+
+                response = self.client.get(self.small_taxonomy_url)
+                assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+                assert "Specific error message" in str(response.data)
+                assert "get_taxonomy" in str(response.data)  # Checking that the stack trace is included
 
     def test_update_tag_in_taxonomy_reflects_changes_in_object_tags(self):
         self.client.force_authenticate(user=self.staff)
