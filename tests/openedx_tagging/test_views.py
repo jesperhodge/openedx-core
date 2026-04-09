@@ -8,10 +8,10 @@ from unittest.mock import patch
 from urllib.parse import parse_qs, quote_plus, urlparse
 
 import ddt  # type: ignore[import]
-from django.db import IntegrityError
 import rules
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db import IntegrityError
 from rest_framework import status
 from rest_framework.test import APITestCase
 
@@ -2194,7 +2194,6 @@ class TestTaxonomyTagsView(TestTaxonomyViewMixin):
             "updated_tag_value": updated_tag_value
         }
 
-
         response = self.client.put(
             self.small_taxonomy_url, update_data, format="json"
         )
@@ -2210,15 +2209,6 @@ class TestTaxonomyTagsView(TestTaxonomyViewMixin):
         assert response.status_code == status.HTTP_400_BAD_REQUEST
         # Check that the error message indicates the duplicate value issue
         self.assertIn("Tag value \"Updated Tag\" already exists in this taxonomy", str(response.data))
-
-    def test_should_sanitize_input(self):
-        """
-        Test that when creating, updating, patching, or deleting tags,
-        the input is sanitized to prevent any sort of malicious input
-        (like XSS, SQL injection, etc.).
-        """
-        # TODO: Implement
-        pass
 
     def test_should_handle_unexpected_errors_gracefully(self):
         """
@@ -2323,7 +2313,7 @@ class TestTaxonomyTagsView(TestTaxonomyViewMixin):
         """
         self.client.force_authenticate(user=self.staff)
         # simulate debug mode by patching the settings.DEBUG value to True
-        with patch("django.conf.settings.DEBUG", True) as mock_debug:
+        with patch("django.conf.settings.DEBUG", True):
             with patch("openedx_tagging.rest_api.v1.views.TaxonomyTagsView.get_taxonomy") as mock_get_taxonomy:
                 mock_get_taxonomy.side_effect = Exception("Specific error message")
 

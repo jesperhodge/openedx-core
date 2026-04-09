@@ -13,6 +13,7 @@ from rest_framework.reverse import reverse
 from openedx_tagging.data import TagData
 from openedx_tagging.import_export.parsers import ParserFormat
 from openedx_tagging.models import ObjectTag, Tag, TagImportTask, Taxonomy
+from openedx_tagging.models.utils import RESERVED_TAG_CHARS
 from openedx_tagging.rules import ObjectTagPermissionItem
 
 from ..utils import UserPermissionsHelper
@@ -59,7 +60,7 @@ class UserPermissionsSerializerMixin(UserPermissionsHelper):
     @property
     def _request(self) -> Request:
         """
-        Returns the current request from the serialize context.
+        Returns the current request from the serializer context.
         """
         return self.context.get('request')  # type: ignore[attr-defined]
 
@@ -217,7 +218,7 @@ class ObjectTagUpdateBodySerializer(serializers.Serializer):  # pylint: disable=
     tagsData = serializers.ListField(child=ObjectTagUpdateByTaxonomySerializer(), required=True)
 
 
-def validate_tag_value(value, context, fields, field_name):
+def validate_tag_value(value, context):
     """
     Validate this tag value is unique within the current taxonomy context and
     does not contain forbidden characters.
@@ -231,9 +232,10 @@ def validate_tag_value(value, context, fields, field_name):
                 f'Tag value "{value}" already exists in this taxonomy.', code='unique'
             )
 
-        # validator checks there are no forbidden characters ">" or ";":
-        if ">" in value or ";" in value:
-            raise serializers.ValidationError('Tag values cannot contain ">" or ";" characters.')
+    # validator checks there are no forbidden characters ">" or ";":
+    for char in value:
+        if char in RESERVED_TAG_CHARS:
+            raise serializers.ValidationError('Tag values cannot contain "\t" or ">" or ";" characters.')
     return value
 
 
@@ -261,7 +263,7 @@ class TagDataSerializer(UserPermissionsSerializerMixin, serializers.Serializer):
         """
         Runs validations for the tag value.
         """
-        return validate_tag_value(value, self.context, self.fields, "value")
+        return validate_tag_value(value, self.context)
 
     def get_sub_tags_url(self, obj: TagData | Tag):
         """
@@ -333,7 +335,7 @@ class TaxonomyTagCreateBodySerializer(serializers.Serializer):  # pylint: disabl
         """
         Run validations for the tag value.
         """
-        return validate_tag_value(value, self.context, self.fields, "tag")
+        return validate_tag_value(value, self.context)
 
 
 class TaxonomyTagUpdateBodySerializer(serializers.Serializer):  # pylint: disable=abstract-method
@@ -348,7 +350,7 @@ class TaxonomyTagUpdateBodySerializer(serializers.Serializer):  # pylint: disabl
         """
         Run validations for the updated tag value.
         """
-        return validate_tag_value(value, self.context, self.fields, "updated_tag_value")
+        return validate_tag_value(value, self.context)
 
 
 class TaxonomyTagDeleteBodySerializer(serializers.Serializer):  # pylint: disable=abstract-method
@@ -367,11 +369,19 @@ class TaxonomyTagDeleteBodySerializer(serializers.Serializer):  # pylint: disabl
         """
         # Iterate through the list and make one bulk request that checks whether every tag.value exists
         taxonomy_id = self.context.get("taxonomy_id")
-        existing_tags = set(Tag.objects.filter(taxonomy_id=taxonomy_id, value__in=tags_list).values_list("value", flat=True))
+        existing_tags = set(
+            Tag.objects.filter(taxonomy_id=taxonomy_id, value__in=tags_list)
+            .values_list("value", flat=True)
+        )
         missing_tags = [tag for tag in tags_list if tag not in existing_tags]
+
         if missing_tags:
-            raise serializers.ValidationError(f"Deletion aborted. The following tags do not exist and cannot be deleted: {', '.join(missing_tags)}")
+            raise serializers.ValidationError(
+                f"Deletion aborted. The following tags do not exist and cannot be deleted:"
+                f" {', '.join(missing_tags)}"
+            )
         return tags_list
+
 
 class TaxonomyImportBodySerializer(serializers.Serializer):  # pylint: disable=abstract-method
     """

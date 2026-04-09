@@ -12,22 +12,23 @@ from rest_framework.exceptions import APIException, PermissionDenied
 from rest_framework.response import Response
 from rest_framework.views import exception_handler
 
-
 log = logging.getLogger(__name__)
 
 
 def custom_exception_handler(exc, context):
     """
     Return standard DRF errors for APIException and a generic 500 otherwise.
+    This exception handler should eventually be replaced by a more top-level
+    exception handler in the openedx-platform repo.
     """
     # For exceptions expected by DRF return the standard DRF error response:
-    # Instances of APIException, subclasses of APIException, Django's Http404 exception, and Django's PermissionDenied exception.
+    # Instances of APIException, subclasses of APIException, Django's Http404 exception,
+    # and Django's PermissionDenied exception.
     is_expected_exception = isinstance(
         exc, (APIException, Http404, PermissionDenied)
     )
     if is_expected_exception:
         return exception_handler(exc, context)
-
 
     # if django settings have DEBUG=True
     if settings.DEBUG:
