@@ -866,7 +866,8 @@ class TaxonomyTagsView(TaggingExceptionHandlerMixin, ListAPIView, RetrieveUpdate
         """
         taxonomy = self.get_taxonomy()
 
-        body = TaxonomyTagCreateBodySerializer(data=request.data)
+        serializer_context = self.get_serializer_context()
+        body = TaxonomyTagCreateBodySerializer(data=request.data, context=serializer_context)
         body.is_valid(raise_exception=True)
 
         tag = body.data.get("tag")
@@ -882,7 +883,6 @@ class TaxonomyTagsView(TaggingExceptionHandlerMixin, ListAPIView, RetrieveUpdate
         except ValueError as e:
             raise ValidationError(e) from e
 
-        serializer_context = self.get_serializer_context()
         return Response(
             self.serializer_class(new_tag, context=serializer_context).data,
             status=status.HTTP_201_CREATED
@@ -895,7 +895,8 @@ class TaxonomyTagsView(TaggingExceptionHandlerMixin, ListAPIView, RetrieveUpdate
         """
         taxonomy = self.get_taxonomy()
 
-        body = TaxonomyTagUpdateBodySerializer(data=request.data)
+        serializer_context = self.get_serializer_context()
+        body = TaxonomyTagUpdateBodySerializer(data=request.data, context=serializer_context)
         body.is_valid(raise_exception=True)
 
         tag = body.data.get("tag")
@@ -908,7 +909,6 @@ class TaxonomyTagsView(TaggingExceptionHandlerMixin, ListAPIView, RetrieveUpdate
         except ValueError as e:
             raise ValidationError(e) from e
 
-        serializer_context = self.get_serializer_context()
         return Response(
             self.serializer_class(updated_tag, context=serializer_context).data,
             status=status.HTTP_200_OK
@@ -922,7 +922,8 @@ class TaxonomyTagsView(TaggingExceptionHandlerMixin, ListAPIView, RetrieveUpdate
         """
         taxonomy = self.get_taxonomy()
 
-        body = TaxonomyTagDeleteBodySerializer(data=request.data)
+        serializer_context = self.get_serializer_context()
+        body = TaxonomyTagDeleteBodySerializer(data=request.data, context=serializer_context)
         body.is_valid(raise_exception=True)
 
         tags = body.data.get("tags")

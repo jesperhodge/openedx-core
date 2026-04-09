@@ -217,6 +217,26 @@ class ObjectTagUpdateBodySerializer(serializers.Serializer):  # pylint: disable=
     tagsData = serializers.ListField(child=ObjectTagUpdateByTaxonomySerializer(), required=True)
 
 
+def validate_tag_value(value, context, fields, field_name):
+    """
+    Validate this tag value is unique within the current taxonomy context and
+    does not contain forbidden characters.
+    """
+    taxonomy_id = context.get("taxonomy_id")
+    if taxonomy_id is not None:
+        # Check if tag value already exists within this taxonomy. If so, raise a validation error.
+        queryset = Tag.objects.filter(taxonomy_id=taxonomy_id, value=value)
+        if queryset.exists():
+            raise serializers.ValidationError(
+                f'Tag value "{value}" already exists in this taxonomy.', code='unique'
+            )
+
+        # validator checks there are no forbidden characters ">" or ";":
+        if ">" in value or ";" in value:
+            raise serializers.ValidationError('Tag values cannot contain ">" or ";" characters.')
+    return value
+
+
 class TagDataSerializer(UserPermissionsSerializerMixin, serializers.Serializer):  # pylint: disable=abstract-method
     """
     Serializer for TagData dicts. Also can serialize Tag instances.
@@ -236,6 +256,12 @@ class TagDataSerializer(UserPermissionsSerializerMixin, serializers.Serializer):
     sub_tags_url = serializers.SerializerMethodField()
     can_change_tag = serializers.SerializerMethodField()
     can_delete_tag = serializers.SerializerMethodField()
+
+    def validate_value(self, value):
+        """
+        Runs validations for the tag value.
+        """
+        return validate_tag_value(value, self.context, self.fields, "value")
 
     def get_sub_tags_url(self, obj: TagData | Tag):
         """
@@ -303,6 +329,12 @@ class TaxonomyTagCreateBodySerializer(serializers.Serializer):  # pylint: disabl
     parent_tag_value = serializers.CharField(required=False)
     external_id = serializers.CharField(required=False)
 
+    def validate_tag(self, value):
+        """
+        Run validations for the tag value.
+        """
+        return validate_tag_value(value, self.context, self.fields, "tag")
+
 
 class TaxonomyTagUpdateBodySerializer(serializers.Serializer):  # pylint: disable=abstract-method
     """
@@ -311,6 +343,12 @@ class TaxonomyTagUpdateBodySerializer(serializers.Serializer):  # pylint: disabl
 
     tag = serializers.CharField(required=True)
     updated_tag_value = serializers.CharField(required=True)
+
+    def validate_updated_tag_value(self, value):
+        """
+        Run validations for the updated tag value.
+        """
+        return validate_tag_value(value, self.context, self.fields, "updated_tag_value")
 
 
 class TaxonomyTagDeleteBodySerializer(serializers.Serializer):  # pylint: disable=abstract-method
@@ -323,6 +361,17 @@ class TaxonomyTagDeleteBodySerializer(serializers.Serializer):  # pylint: disabl
     )
     with_subtags = serializers.BooleanField(required=False)
 
+    def validate_tags(self, tags_list):
+        """
+        Make sure all tags are valid and exist before attempting deletion, to avoid partial deletes.
+        """
+        # Iterate through the list and make one bulk request that checks whether every tag.value exists
+        taxonomy_id = self.context.get("taxonomy_id")
+        existing_tags = set(Tag.objects.filter(taxonomy_id=taxonomy_id, value__in=tags_list).values_list("value", flat=True))
+        missing_tags = [tag for tag in tags_list if tag not in existing_tags]
+        if missing_tags:
+            raise serializers.ValidationError(f"Deletion aborted. The following tags do not exist and cannot be deleted: {', '.join(missing_tags)}")
+        return tags_list
 
 class TaxonomyImportBodySerializer(serializers.Serializer):  # pylint: disable=abstract-method
     """

@@ -2201,7 +2201,7 @@ class TestTaxonomyTagsView(TestTaxonomyViewMixin):
 
         assert response.status_code == status.HTTP_400_BAD_REQUEST
         # Check that the error message indicates the duplicate value issue
-        self.assertIn("Tag with this value already exists in this taxonomy", str(response.data))
+        self.assertIn("Tag value \"Updated Tag\" already exists in this taxonomy", str(response.data))
 
         response = self.client.patch(
             self.small_taxonomy_url, update_data, format="json"
@@ -2209,7 +2209,7 @@ class TestTaxonomyTagsView(TestTaxonomyViewMixin):
 
         assert response.status_code == status.HTTP_400_BAD_REQUEST
         # Check that the error message indicates the duplicate value issue
-        self.assertIn("Tag with this value already exists in this taxonomy", str(response.data))
+        self.assertIn("Tag value \"Updated Tag\" already exists in this taxonomy", str(response.data))
 
     def test_should_sanitize_input(self):
         """
