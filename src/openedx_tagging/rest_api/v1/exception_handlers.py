@@ -2,8 +2,9 @@
 Tagging REST API exception handling utilities.
 """
 
+from django.http import Http404
 from rest_framework import status
-from rest_framework.exceptions import APIException
+from rest_framework.exceptions import APIException, PermissionDenied
 from rest_framework.response import Response
 from rest_framework.views import exception_handler
 
@@ -12,7 +13,12 @@ def custom_exception_handler(exc, context):
     """
     Return standard DRF errors for APIException and a generic 500 otherwise.
     """
-    if isinstance(exc, APIException):
+    # For exceptions expected by DRF return the standard DRF error response:
+    # Instances of APIException, subclasses of APIException, Django's Http404 exception, and Django's PermissionDenied exception.
+    is_expected_exception = isinstance(
+        exc, (APIException, Http404, PermissionDenied)
+    )
+    if is_expected_exception:
         return exception_handler(exc, context)
 
     return Response(
