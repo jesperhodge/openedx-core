@@ -2,11 +2,18 @@
 Tagging REST API exception handling utilities.
 """
 
+import logging
+import traceback
+
+from django.conf import settings
 from django.http import Http404
 from rest_framework import status
 from rest_framework.exceptions import APIException, PermissionDenied
 from rest_framework.response import Response
 from rest_framework.views import exception_handler
+
+
+log = logging.getLogger(__name__)
 
 
 def custom_exception_handler(exc, context):
@@ -20,6 +27,18 @@ def custom_exception_handler(exc, context):
     )
     if is_expected_exception:
         return exception_handler(exc, context)
+
+
+    # if django settings have DEBUG=True
+    if settings.DEBUG:
+        log.exception(exc)
+        # stringify the exception and a stack trace in a readable format
+        detail = f"{exc.__class__.__name__}: {str(exc)}\nTraceback: {traceback.format_exc()}"
+        # return Response with exception details for easier debugging
+        return Response(
+            {"detail": detail},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
 
     return Response(
         {"detail": "An unexpected error occurred while processing the request."},

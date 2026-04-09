@@ -2316,6 +2316,22 @@ class TestTaxonomyTagsView(TestTaxonomyViewMixin):
             response = delete_request(delete_data)
             assert_generic_500_response(response)
 
+    def test_passes_stack_trace_upwards_when_settings_debug_true(self):
+        """
+        Test that when an unexpected error occurs, if we're in debug mode, the stack trace is included in the response
+        to help with debugging, instead of just a generic error message.
+        """
+        self.client.force_authenticate(user=self.staff)
+        # simulate debug mode by patching the settings.DEBUG value to True
+        with patch("django.conf.settings.DEBUG", True) as mock_debug:
+            with patch("openedx_tagging.rest_api.v1.views.TaxonomyTagsView.get_taxonomy") as mock_get_taxonomy:
+                mock_get_taxonomy.side_effect = Exception("Specific error message")
+
+                response = self.client.get(self.small_taxonomy_url)
+                assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+                self.assertIn("Specific error message", str(response.data))
+                self.assertIn("get_taxonomy", str(response.data))  # Checking that the stack trace is included
+
     def test_update_tag_in_taxonomy_reflects_changes_in_object_tags(self):
         self.client.force_authenticate(user=self.staff)
 
