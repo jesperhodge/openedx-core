@@ -19,7 +19,8 @@ def custom_exception_handler(exc, context):
     """
     Return standard DRF errors for APIException and a generic 500 otherwise.
     This exception handler should eventually be replaced by a more top-level
-    exception handler in the openedx-platform repo.
+    exception handler in the openedx-platform repo after the ADR for it is accepted:
+    https://github.com/openedx/openedx-platform/pull/38246
     """
     # For exceptions expected by DRF return the standard DRF error response:
     # Instances of APIException, subclasses of APIException, Django's Http404 exception,
