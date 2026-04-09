@@ -2274,11 +2274,14 @@ class TestTaxonomyTagsView(TestTaxonomyViewMixin):
             assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
             self.assertIn("An unexpected error occurred while processing the request.", str(response.data))
 
-        # Simulate a generic exception
-        with patch("openedx_tagging.models.Tag.objects.filter") as mock_filter:
-            mock_filter.side_effect = Exception("Unexpected error")
+        # Simulate a generic exception in a method used across all verbs in this view.
+        with patch("openedx_tagging.rest_api.v1.views.TaxonomyTagsView.get_taxonomy") as mock_get_taxonomy:
+            mock_get_taxonomy.side_effect = Exception("Unexpected error")
 
             update_data, create_data, delete_data = prepare_data_for_existing_tag()
+
+            response = get_request({})
+            assert_generic_500_response(response)
 
             response = put_request(update_data)
             assert_generic_500_response(response)
@@ -2292,11 +2295,14 @@ class TestTaxonomyTagsView(TestTaxonomyViewMixin):
             response = delete_request(delete_data)
             assert_generic_500_response(response)
 
-        # Simulate an IntegrityError
-        with patch("tagging.models.Tag.objects.filter") as mock_filter:
-            mock_filter.side_effect = IntegrityError("Integrity error")
+        # Simulate an IntegrityError in the same shared method.
+        with patch("openedx_tagging.rest_api.v1.views.TaxonomyTagsView.get_taxonomy") as mock_get_taxonomy:
+            mock_get_taxonomy.side_effect = IntegrityError("Integrity error")
 
             update_data, create_data, delete_data = prepare_data_for_existing_tag()
+
+            response = get_request({})
+            assert_generic_500_response(response)
 
             response = put_request(update_data)
             assert_generic_500_response(response)
