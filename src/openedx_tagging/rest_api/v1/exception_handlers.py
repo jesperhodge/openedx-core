@@ -31,8 +31,9 @@ def _custom_exception_handler(exc: Exception, context: dict) -> Response | None:
     if is_expected_exception:
         return exception_handler(exc, context)
 
-    # Making really sure that any unexpected exception gets logged
-    log.error(exc, stack_info=True, exc_info=True)
+    # DRF always calls exception handlers from within an `except:` block, so we can assume
+    # that `log.exception` will automatically insert those exception details and a stack trace.
+    log.exception("Unexpected exception while handling API request")
 
     if settings.DEBUG:
         description_with_traceback = f"{exc.__class__.__name__}: {str(exc)}\n\nTraceback:\n{traceback.format_exc()}"
