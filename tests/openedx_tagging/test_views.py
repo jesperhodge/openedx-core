@@ -8,11 +8,11 @@ from unittest.mock import patch
 from urllib.parse import parse_qs, quote_plus, urlparse
 
 import ddt  # type: ignore[import]
-from django.test import override_settings
 import rules
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import IntegrityError
+from django.test import override_settings
 from rest_framework import status
 from rest_framework.test import APITestCase
 
