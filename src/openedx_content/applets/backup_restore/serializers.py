@@ -6,6 +6,7 @@ from datetime import timezone
 from rest_framework import serializers
 
 from ..components import api as components_api
+from ..components.models import ComponentType
 
 
 class LearningPackageSerializer(serializers.Serializer):  # pylint: disable=abstract-method
@@ -59,22 +60,53 @@ class EntityVersionSerializer(serializers.Serializer):  # pylint: disable=abstra
 class ComponentSerializer(EntitySerializer):  # pylint: disable=abstract-method
     """
     Serializer for components.
-    Contains logic to convert entity_key to component_type and local_key.
+    Contains logic to convert entity_key to component_type and component_code.
     """
 
     def validate(self, attrs):
         """
         Custom validation logic:
-        parse the entity_key into (component_type, local_key).
+        parse the entity_key into (component_type, component_code).
         """
         entity_key = attrs["key"]
         try:
-            component_type_obj, local_key = components_api.get_or_create_component_type_by_entity_key(entity_key)
+            component_type_obj, component_code = _get_or_create_component_type_by_entity_key(entity_key)
             attrs["component_type"] = component_type_obj
-            attrs["local_key"] = local_key
+            attrs["component_code"] = component_code
         except ValueError as exc:
             raise serializers.ValidationError({"key": str(exc)})
         return attrs
+
+
+def _get_or_create_component_type_by_entity_key(entity_key: str) -> tuple[ComponentType, str]:
+    """
+    Get or create a ComponentType based on a full [entity].key string.
+
+    The entity key is expected to be in the format
+    ``"{namespace}:{type_name}:{component_code}"``. This function will parse out
+    the ``namespace`` and ``type_name`` parts and use those to get or create the
+    ComponentType.
+
+    Raises ValueError if the entity_key is not in the expected format.
+
+    Historical note: In Ulmo, this function was part of the public API. This was
+    inappropriate because the exact format of entity_keys is just a convention
+    rather than something API callers should count on. That said, it is safe to
+    assume that in all "v1" archives, the components' entity keys are safe to
+    parse into (namespace, type, code). So, we have moved this parsing logic
+    from the public API to just this internal halper function.  Future devs,
+    please do not make new external guarantees about the format of entity keys
+    (aka entity_refs).  A future "v2" backup-restore format will drop this
+    assumption of parse-ability..
+    """
+    try:
+        namespace, type_name, component_code = entity_key.split(':', 2)
+    except ValueError as exc:
+        raise ValueError(
+            f"Invalid entity_key format: {entity_key!r}. "
+            "Expected format: '{namespace}:{type_name}:{component_code}'"
+        ) from exc
+    return components_api.get_or_create_component_type(namespace, type_name), component_code
 
 
 class ComponentVersionSerializer(EntityVersionSerializer):  # pylint: disable=abstract-method
