@@ -218,7 +218,7 @@ class ObjectTagUpdateBodySerializer(serializers.Serializer):  # pylint: disable=
     tagsData = serializers.ListField(child=ObjectTagUpdateByTaxonomySerializer(), required=True)
 
 
-def validate_tag_value(value: str, context: dict, original_value: str | None = None):
+def validate_tag_value(value, context, original_value=None):
     """
     Validate this tag value is unique within the current taxonomy context and
     does not contain forbidden characters.
