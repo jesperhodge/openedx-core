@@ -2218,6 +2218,9 @@ class TestTaxonomyTagsView(TestTaxonomyViewMixin):
         self.client.force_authenticate(user=self.staff)
         existing_tag = self.small_taxonomy.tag_set.filter(parent=None).first()
 
+        # Avoiding false positives
+        assert existing_tag.value is not existing_tag.value.upper()
+
         update_data = {
             "tag": existing_tag.value,
             "updated_tag_value": existing_tag.value.upper()
