@@ -221,7 +221,7 @@ class ObjectTagUpdateBodySerializer(serializers.Serializer):  # pylint: disable=
 def validate_tag_value(value, context, original_value=None):
     """
     Validates the incoming request early:
-    - This tag is unique, not a duplicate. (The model does not validate this sufficiently.)
+    - This tag is unique, not a duplicate. (The model only validates this if you call `full_clean()`.)
     - There are no forbidden / reserved characters present. There is an additional
     model-side validation for this as well, but we are keeping this so we can validate
     the incoming request immediately.
