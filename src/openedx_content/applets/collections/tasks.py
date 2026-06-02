@@ -31,14 +31,14 @@ def emit_collections_changed_for_entity_changes_task(
     new_version_id is not None) that aren't in any collection result in a no-op.
     """
     all_entity_ids: list[PublishableEntity.ID] = [
-        PublishableEntity.PublishableEntityID(x)
-        for x in set(removed_entity_ids) | set(added_entity_ids)
+        PublishableEntity.PublishableEntityID(x) for x in set(removed_entity_ids) | set(added_entity_ids)
     ]
     if not all_entity_ids:
         return 0
 
     affected_cpes = (
         CollectionPublishableEntity.objects.filter(entity_id__in=all_entity_ids)
+        .filter(collection__enabled=True)  # Don't send events for soft-deleted collections
         .select_related("collection__learning_package")
         .order_by("collection_id", "entity_id")
     )
