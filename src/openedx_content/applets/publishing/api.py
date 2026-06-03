@@ -474,6 +474,10 @@ def publish_from_drafts(
     By default, this will also publish all dependencies (e.g. unpinned children)
     of the Drafts that are passed in.
     """
+    if DraftChangeLogContext.get_active_draft_change_log(learning_package_id) is not None:
+        raise ValidationError(
+            f"Cannot publish learning package {learning_package_id} while in bulk_draft_changes_for()."
+        )
     if published_at is None:
         published_at = datetime.now(tz=timezone.utc)
 
