@@ -205,9 +205,66 @@ the system evaluates them as learners progress; dashboards show competency progr
 CBE is intended as a **core (kernel) feature**, not an optional plugin.
 
 A **competency is just a `Tag`** in a taxonomy that has been **enabled for competency
-features** (a `CompetencyTaxonomy`). This is the bridge between Part A and Part B.
+features** (a `CompetencyTaxonomy`). This is the bridge between Part A and Part B — and
+because it surprises most people, the next section spells out exactly what it implies.
 
-### B.2 Where it lives & why
+### B.2 The competency itself: a Tag, not its own table
+
+This is the part that most often trips people up. **There is no `Competency` model.** A
+competency is **literally a row in `oel_tagging_tag`** (Part A's `Tag`) whose taxonomy is a
+`CompetencyTaxonomy`. "Being a competency" is therefore **contextual**: the same generic
+`Tag` model is reused, and the *only* thing that makes a given tag a competency is that its
+taxonomy has been competency-enabled. The CBE applet introduces **no new identity** for the
+competency — it simply **references the existing tag**.
+
+Read the chain one hop at a time, noting what each row *means* (this mapping was confirmed
+with the architect):
+
+| Row | What it is | Plain-language meaning |
+|---|---|---|
+| `oel_tagging_tag` (in a `CompetencyTaxonomy`) | **the competency** | The thing to be mastered, e.g. *"Writing Poetry"*. Exists once; course-independent. |
+| `oel_tagging_objecttag` (that tag applied to content) | a **competency-tag application** | *"This assignment / unit / course can be used to demonstrate this competency."* |
+| `CompetencyCriterion` → one `oel_tagging_objecttag` + a rule | a **rule bound to one application** | *"To count this content toward the competency, evaluate it like this (e.g. Grade ≥ 75%)."* |
+| `StudentCompetencyStatus` → (`oel_tagging_tag_id`, user) | the **per-learner result for the competency** | *"How competent is this student at this tag/competency?"* |
+
+**The tag-vs-application distinction is what resolves the confusion.** Notice *which*
+tagging row each CBE table points at — they are deliberately different:
+
+- A **`CompetencyCriteriaGroup`** (and the `CompetencyAchievementCriteria` tree it roots)
+  carries **`oel_tagging_tag_id`** → *the whole criteria tree is about one competency (the
+  Tag).*
+- A **`CompetencyCriterion`** (a leaf) carries **`oel_tagging_objecttag_id`** → *each leaf
+  pins a rule to one specific content application of that competency.*
+- **`StudentCompetencyStatus`** carries **`oel_tagging_tag_id`** again → *the result is
+  reported at the competency (Tag) level, not per piece of content.*
+
+```
+Tag  ("Writing Poetry", in a CompetencyTaxonomy)  ────────────┐  (the competency)
+  │                                                           │
+  ├─ ObjectTag (Assignment 7 → Tag) ── CompetencyCriterion ───┤  CriteriaGroup tree
+  └─ ObjectTag (Assignment 9 → Tag) ── CompetencyCriterion ───┘  is *about* this Tag
+                                                              │
+                       StudentCompetencyStatus(user, Tag)  =  result for the competency
+```
+
+**What this means for relationships & dependencies:**
+
+- **The dependency points one way: CBE → tagging, never the reverse.** Every CBE table
+  holds FKs *into* `oel_tagging_tag` / `oel_tagging_objecttag`; `openedx_tagging` knows
+  nothing about competencies. This is the concrete reason CBE could not live inside
+  `openedx_tagging` (see B.3): tagging must remain a generic, standalone library, so the
+  arrow has to point from competencies toward tags.
+- **A competency is reusable and course-independent.** Because the competency *is* the Tag,
+  many criteria groups — across many courses and course runs — can reference the **same**
+  competency Tag, while the rules that define *how to demonstrate it* are course-scoped via
+  `CompetencyCriteriaGroup.course_id`. One competency ↔ many course-specific rule trees.
+- **It explains the resilience and delete behavior.** Since the competency's identity lives
+  in the Tag, the tag/taxonomy are treated as **non-evaluative display metadata** (and so
+  are deliberately *not* versioned — see B.5), and once any `StudentCompetencyStatus` exists
+  the Tag **cannot be hard-deleted** (delete protection — see B.4), precisely because
+  learner results are keyed by it.
+
+### B.3 Where it lives & why
 [0001-competency-criteria-location.rst](docs/openedx_learning/decisions/0001-competency-criteria-location.rst)
 
 Decision: **the top-level `openedx_learning` app, as a `cbe` applet**, alongside a
@@ -228,7 +285,7 @@ Why not elsewhere (rejected alternatives):
 - **Not a separate repo** — too much packaging/CI/migration overhead for a tightly-coupled
   core feature; applets give a clean split-later path.
 
-### B.3 The data model
+### B.4 The data model
 [0002-competency-criteria-model.rst](docs/openedx_learning/decisions/0002-competency-criteria-model.rst)
 (diagram: `docs/openedx_learning/decisions/images/CompetencyCriteriaModel.png`)
 
@@ -286,7 +343,7 @@ hard-deleting the related definition rows (taxonomy, tag, objecttag, groups, cri
 profile) is **blocked**; retiring becomes archive-only. With no learner status yet, hard
 delete cascades freely.
 
-### B.4 Versioning & audit
+### B.5 Versioning & audit
 [0003-competency-criteria-versioning.rst](docs/openedx_learning/decisions/0003-competency-criteria-versioning.rst)
 
 Initial approach (deliberately **not** the full publishing framework):
@@ -308,7 +365,7 @@ Initial approach (deliberately **not** the full publishing framework):
 Rejected: deferring versioning entirely; ad-hoc per-model version columns; the full
 publishable framework (too heavy for this phase); a generic append-only event log.
 
-### B.5 Worked example (from ADR 0002)
+### B.6 Worked example (from ADR 0002)
 
 Competency **"Writing Poetry"**, Course **X**, assignments 7 & 9 (both tagged "Writing
 Poetry" via `oel_tagging_objecttag`). Course-scoped `CompetencyRuleProfile` default =
