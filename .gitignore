@@ -1,4 +1,6 @@
-.claude
+# Temporarily adding .claude to the repository. Only for an internal development branch.
+# At least for now, it must not be merged to master like this.
+# .claude
 *.py[cod]
 __pycache__
 .pytest_cache
