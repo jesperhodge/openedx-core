@@ -28,6 +28,8 @@ The umbrella ``src/openedx_learning`` app will aggregate its applets into a sing
 
 This placement will keep CBE close to shared learning-domain concepts like ``learning_pathways``.
 
+Grade changes that drive competency evaluation are consumed by openedx-core directly from ``openedx-events`` via the ``PERSISTENT_SUBSECTION_GRADE_CHANGED`` event, rather than through a shim in openedx-platform. openedx-core owns the listener that subscribes to this event, evaluates the competency criteria, and persists learner status. This adopts what was previously rejected alternative 8; the openedx-events work it depended on is now underway (openedx-events PRs #545 / #587).
+
 Rejected Alternatives
 ---------------------
 1. Put all CBE competency criteria and learner status in a single ``openedx-core`` app under ``src/openedx_competency_criteria``
@@ -72,10 +74,12 @@ Rejected Alternatives
     - Cons:
         - Adds packaging and versioning overhead for a tightly coupled domain.
         - Increases coordination cost for migrations and API changes.
-8. Migrate grading signals to openedx-events now and have openedx-core consume events directly
-    - Pros:
-        - Aligns with the long-term direction of moving events out of edx-platform.
-        - Avoids a shim app in edx-platform and reduces tech debt.
-    - Cons:
-        - Requires cross-repo coordination and work beyond the current scope.
-        - Depends on changes to openedx-events that are not yet scheduled or ready.
+
+(A former alternative 8, "migrate grading signals to openedx-events now and have openedx-core consume events directly," was originally rejected as out of scope. It has since been adopted; see Decisions.)
+
+Changelog
+---------
+
+2026-07-08:
+
+* Adopted former rejected alternative 8: openedx-core consumes grade-change events directly from ``openedx-events`` (``PERSISTENT_SUBSECTION_GRADE_CHANGED``) and owns the listener. Recorded this in Decisions and removed the alternative from Rejected Alternatives.
