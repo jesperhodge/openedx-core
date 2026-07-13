@@ -5,7 +5,7 @@
 
 Status
 ------
-Proposed (draft).
+Proposed.
 
 Context
 -------
@@ -37,84 +37,82 @@ throughput.
 
 Decision
 --------
-This decision is still open. Two approaches keep same-learner correctness while batching for
-throughput. They share the entire pipeline and differ only in how they prevent same-learner
-write-skew. The choice turns on expected volume, the event transport, and how much platform-side
-coupling is acceptable.
+Grade-change events are consumed from the openedx-events event bus, processed in windowed
+micro-batches, and serialized by a single deployment-wide batch lock, so a learner's competency
+mastery is always recorded correctly. Correctness is chosen over horizontal write throughput:
+a single serialized pipeline is adequate while it keeps up with peak grading, and it keeps the
+recorder self-contained and behaving identically on any Open edX deployment.
 
-**Common to both approaches.** Grade-change events are consumed from the openedx-events event bus
-and processed in windowed micro-batches. Resolving which competencies a subsection feeds is
-learner-independent, so it is cached and de-duplicated across the batch. Each batch does one bulk
-read of current statuses, evaluates in memory, and does one bulk append, collapsing per-event
-transaction overhead into a small, fixed number of round-trips. The in-memory engine
-(:ref:`openedx-learning-adr-0002`) is unchanged: to apply several of one learner's events, the
-recorder folds them in edited-timestamp order against an evolving snapshot. Persistence stays
-append-only and writes a new row only when the computed status differs from the current one; an
-older, out-of-order grade is ignored by comparing its source edited timestamp against the current
-leaf's, so a late arrival cannot regress a newer status.
+**The recording pipeline.** Resolving which competencies a subsection feeds is learner-independent,
+so it is cached and de-duplicated across the batch. Each batch does one bulk read of current
+statuses, evaluates in memory, and does one bulk append, collapsing per-event transaction overhead
+into a small, fixed number of round-trips. The in-memory engine (:ref:`openedx-learning-adr-0002`)
+is unchanged: to apply several of one learner's events, the recorder folds them in edited-timestamp
+order against an evolving snapshot. Persistence stays append-only (:ref:`openedx-learning-adr-0003`)
+and writes a new row only when the computed status differs from the current one; an older,
+out-of-order grade is ignored by comparing its source edited timestamp against the current leaf's,
+so a late arrival cannot regress a newer status.
 
-They differ only in the correctness mechanism.
+**Correctness by a single serializing batch lock.** One deployment-wide lock guards the whole batch
+operation, so only one batch runs at a time across the deployment. The read, evaluation, and append
+for a batch all happen under that lock, so no two workers ever evaluate the same learner
+concurrently and the same-learner write-skew described in the Context cannot occur. The lock is
+realized on infrastructure every deployment already has (for example, a database-backed advisory
+lock) rather than on the event transport, so the recorder behaves the same on any event-bus backend
+and adds no new operational dependency.
 
-**Approach A — correctness by keyed partitioning.**
-Events are partitioned by ``user_id``: the key is *hashed* onto a small, fixed number of partitions
-(not one partition per learner), so every event for a learner lands on the same partition and is
-consumed by exactly one consumer. Same-learner events are processed serially by construction, with
-no database lock, while different learners are processed in parallel across partitions.
+Accepted tradeoffs:
 
+    - The write path is a single pipeline: only one batch runs at a time, so recording and evaluating does not
+      scale horizontally. This is adequate only while one batch pipeline keeps up with peak grading;
+      sustained high-volume growth would force a revisit.
+    - It introduces a lock and its lifecycle (acquisition, timeout, stale-lock recovery on crash)
+      that a lock-free partitioning design would avoid.
+
+Rejected Alternatives
+---------------------
+
+1. Correctness by keyed partitioning instead of a lock.
+   Partition grade-change events by ``user_id``: the key is *hashed* onto a small, fixed number of
+   partitions (not one partition per learner), so every event for a learner lands on the same
+   partition and is consumed by exactly one consumer. Same-learner events are then processed serially
+   by construction, with no database lock, while different learners are processed in parallel across
+   partitions.
     - Pros:
         - Correctness is structural; no lock and no lock lifecycle.
         - The write path scales horizontally with the partition count.
     - Cons:
         - Relies on the transport routing by key. Kafka does this natively; Redis Streams consumer
-          groups do not, so on Redis this needs application-level sharding into per-shard streams.
-        - Couples core to a platform-side contract: the producer must set the partition key and keep
-          the partition count stable (owned by the platform-side ticket).
+          groups do not, so on Redis it needs application-level sharding into per-shard streams.
+        - Couples openedx-core to a platform-side contract in the wrong direction: the producer, in
+          openedx-platform, must set the partition key and keep the partition count stable, so the
+          core recorder's correctness depends on platform-side behavior.
         - Changing the partition count reshuffles learners and can briefly let two consumers touch
-          one learner, so it needs an on-demand reconciliation command (Ticket R) as a backstop.
+          one learner, so it needs an on-demand reconciliation command as a backstop.
+    - Why rejected: it optimizes for horizontal throughput at the cost of the two properties this
+      decision values most. It depends on the event transport (Kafka's keyed routing, or Redis-side
+      sharding that is not an established pattern in vanilla Open edX), so it would not behave
+      uniformly on a stock deployment, whereas the chosen approach is transport-agnostic. And it
+      inverts the intended dependency direction by making openedx-core rely on an openedx-platform
+      partition-key contract plus a reconciliation backstop. The horizontal scale it buys is not
+      needed while a single batch pipeline keeps up with peak grading, and accuracy is the priority
+      over the extra latency the single pipeline adds.
 
-**Approach B — correctness by a single serializing batch lock.**
-One lock guards the whole batch operation, so only one batch runs at a time across the deployment.
-The read, evaluation, and append for a batch all happen under that lock, so no two workers ever
-evaluate the same learner concurrently.
-
-    - Pros:
-        - Correctness is total: no write-skew is possible, including across any reshuffle, so no
-          reconciliation backstop is needed.
-        - Self-contained: no keyed-partition contract, no platform-side partition key, no Ticket P
-          or Ticket R.
-        - Transport-agnostic; behaves the same on Kafka or Redis.
-    - Cons:
-        - The write path is a single pipeline: only one batch runs at a time, so recording does not
-          scale horizontally. Adequate only while one batch pipeline keeps up with peak grading.
-        - Re-introduces a lock and its lifecycle (acquisition, timeout, stale-lock recovery on
-          crash), the machinery this epic otherwise removes.
-
-Deciding factors:
-
-    - **Peak throughput.** A single serialized pipeline (B) is adequate at modest volume; sustained
-      high-volume, bursty grading favors A's horizontal scaling.
-    - **Transport.** Kafka gives A its keyed routing for free; on Redis, A needs application-level
-      sharding, which narrows A's simplicity advantage.
-    - **Coupling tolerance.** B is self-contained; A trades a platform-side partition contract and a
-      reconciliation backstop for horizontal scale.
-
-Rejected Alternatives
----------------------
-
-1. Shrink the batch lock to guard only the bulk read and bulk write, running the per-learner
+2. Shrink the batch lock to guard only the bulk read and bulk write, running the per-learner
    evaluation in parallel outside the lock.
     - Motivation: the database I/O is cheap (a few bulk statements), so locking only the I/O and
-      parallelizing the heavier evaluation looks like it would keep correctness while lifting
-      Approach B's single-pipeline cap.
+      parallelizing the heavier evaluation looks like it would keep correctness while lifting the
+      chosen approach's single-pipeline cap.
     - Why rejected: the lock exists to make each learner's read-evaluate-write atomic against other
       writers, not to protect the I/O. Moving evaluation outside the lock reintroduces the exact
       write-skew from the Context: two workers read the same snapshot for one learner, both
       evaluate, and both append a roll-up from an incomplete picture. Making parallel evaluation
       correct requires that each learner is only ever handled by one worker at a time, which is
-      per-learner isolation, i.e. Approach A. This is therefore not a third option: with the
-      isolation added it is Approach A; without it, it is incorrect.
+      per-learner isolation, i.e. the keyed-partitioning alternative above. This is therefore not a
+      distinct option: with the isolation added it becomes keyed partitioning; without it, it is
+      incorrect.
 
-2. Per-learner database row lock with per-event recording.
+3. Per-learner database row lock with per-event recording.
     - Pros:
         - Correct regardless of delivery order or deployment topology, without depending on how
           events are routed or partitioned.
@@ -127,12 +125,13 @@ Rejected Alternatives
           waited on.
         - Requires an extra per-learner lock table and its locking machinery.
         - Does not batch writes, so per-event transaction and commit overhead dominates at volume.
-      This was the earlier design for this epic; it is correct but the least performant. Both
-      Approach A and Approach B supersede it: A provides the same same-learner serialization as a
-      structural property while allowing parallelism and batching, and B provides it with a single
+      This was an earlier design for competency mastery recording; it is correct but the least
+      performant. Both the chosen batch-lock approach and the keyed-partitioning alternative
+      supersede it: keyed partitioning provides the same same-learner serialization as a structural
+      property while allowing parallelism and batching, and the batch lock provides it with a single
       lock and batched writes instead of a per-learner lock and per-event writes.
 
-3. No lock; assume same-learner conflicts are rare and tolerate them.
+4. No lock; assume same-learner conflicts are rare and tolerate them.
     - Pros:
         - The least machinery of any option: no lock, no partitioning-for-correctness, relying on
           append-only self-healing and a reconciliation job.
@@ -143,7 +142,7 @@ Rejected Alternatives
         - Unacceptable where mastery feeds credentialing and learner- or instructor-facing
           dashboards, in which an incorrect status is directly visible.
 
-4. Recompute derived levels on read instead of materializing them.
+5. Recompute derived levels on read instead of materializing them.
     - Pros:
         - Removes the write-skew hazard entirely: if nothing derived is stored, nothing derived can
           drift, and the write path is trivial.
@@ -151,4 +150,4 @@ Rejected Alternatives
         - Reopens :ref:`openedx-learning-adr-0002`, which deliberately materializes derived levels
           for dashboard read performance.
         - Moves the cost onto every read, which is the surface that decision was protecting.
-        - Out of scope for this epic.
+        - Out of scope for this decision.
