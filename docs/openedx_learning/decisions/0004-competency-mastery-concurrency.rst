@@ -73,11 +73,13 @@ Rejected Alternatives
 ---------------------
 
 1. Correctness by keyed partitioning instead of a lock.
-   Partition grade-change events by ``user_id``: the key is *hashed* onto a small, fixed number of
-   partitions (not one partition per learner), so every event for a learner lands on the same
-   partition and is consumed by exactly one consumer. Same-learner events are then processed serially
-   by construction, with no database lock, while different learners are processed in parallel across
-   partitions.
+
+    Partition grade-change events by ``user_id``: the key is *hashed* onto a small, fixed number of
+    partitions (not one partition per learner), so every event for a learner lands on the same
+    partition and is consumed by exactly one consumer. Same-learner events are then processed serially
+    by construction, with no database lock, while different learners are processed in parallel across
+    partitions.
+
     - Pros:
         - Correctness is structural; no lock and no lock lifecycle.
         - The write path scales horizontally with the partition count.
@@ -100,6 +102,7 @@ Rejected Alternatives
 
 2. Shrink the batch lock to guard only the bulk read and bulk write, running the per-learner
    evaluation in parallel outside the lock.
+
     - Motivation: the database I/O is cheap (a few bulk statements), so locking only the I/O and
       parallelizing the heavier evaluation looks like it would keep correctness while lifting the
       chosen approach's single-pipeline cap.
@@ -125,11 +128,12 @@ Rejected Alternatives
           waited on.
         - Requires an extra per-learner lock table and its locking machinery.
         - Does not batch writes, so per-event transaction and commit overhead dominates at volume.
-      This was an earlier design for competency mastery recording; it is correct but the least
-      performant. Both the chosen batch-lock approach and the keyed-partitioning alternative
-      supersede it: keyed partitioning provides the same same-learner serialization as a structural
-      property while allowing parallelism and batching, and the batch lock provides it with a single
-      lock and batched writes instead of a per-learner lock and per-event writes.
+
+    This was an earlier design for competency mastery recording; it is correct but the least
+    performant. Both the chosen batch-lock approach and the keyed-partitioning alternative
+    supersede it: keyed partitioning provides the same same-learner serialization as a structural
+    property while allowing parallelism and batching, and the batch lock provides it with a single
+    lock and batched writes instead of a per-learner lock and per-event writes.
 
 4. No lock; assume same-learner conflicts are rare and tolerate them.
     - Pros:
