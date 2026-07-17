@@ -204,25 +204,53 @@ Rejected Alternatives
       distinct option: with the isolation added it becomes keyed partitioning; without it, it is
       incorrect.
 
-3. Per-learner database row lock with per-event recording.
+3. A per-learner lock (a lock keyed on the learner) instead of the single deployment-wide lock.
+
+    A per-learner lock is the minimal primitive that satisfies the correctness requirement: it
+    guarantees no two workers evaluate the same learner at once, which is exactly what prevents the
+    same-learner write-skew in the Context. It is therefore *not* rejected for being incorrect. It is
+    rejected because it is dominated on both sides: for correctness alone the single deployment-wide
+    lock is simpler, and for the one thing a per-learner lock adds over that (letting different
+    learners record in parallel) keyed partitioning (alternative 1) is strictly better. The
+    per-learner lock is the awkward middle between the two.
+
     - Pros:
         - Correct regardless of delivery order or deployment topology, without depending on how
           events are routed or partitioned.
-        - Conceptually simple and self-contained: it relies only on the database, with no
-          event-bus partitioning contract.
+        - Self-contained: it relies only on the database, with no event-bus partitioning contract.
+        - Unlike the single deployment-wide lock, it lets different learners be recorded in parallel.
     - Cons:
-        - Processes one event at a time behind a lock and a transaction, so it does not keep up
-          under bursty grading across many learners.
-        - Holds a database connection and a worker for each event while the lock is contended or
-          waited on.
-        - Requires an extra per-learner lock table and its locking machinery.
-        - Does not batch writes, so per-event transaction and commit overhead dominates at volume.
-
-    This was an earlier design for competency mastery recording; it is correct but the least
-    performant. Both the chosen batch-lock approach and the keyed-partitioning alternative
-    supersede it: keyed partitioning provides the same same-learner serialization as a structural
-    property while allowing parallelism and batching, and the batch lock provides it with a single
-    lock and batched writes instead of a per-learner lock and per-event writes.
+        - *It fights the batching the throughput depends on.* The chosen pipeline is fast because it
+          batches across learners: one bulk read, one in-memory evaluation, one bulk write per batch,
+          amortized over every learner in the batch. A per-learner lock is taken per learner, so work
+          is serialized and committed per learner (in the original per-event form, per event), which
+          reintroduces exactly the per-unit transaction, commit, and lock acquire/release overhead
+          that batching removes. Under bursty grading across many learners that per-unit overhead
+          dominates.
+        - *Its lock lifecycle is multiplied across every learner.* The single lock has one lifecycle
+          to operate (acquisition, timeout, stale-lock recovery on a crashed worker). A per-learner
+          lock needs a per-learner lock table (or keyed advisory locks) and that same lifecycle
+          replicated across potentially millions of learner keys, held and waited on concurrently,
+          with a database connection and worker tied up per contended lock.
+        - *The batched variant becomes a multi-lock ordering problem.* Trying to keep the batching by
+          locking every learner in a batch at once means holding many locks simultaneously and
+          acquiring them in a consistent order to avoid deadlock between batches whose learner sets
+          overlap: more failure modes than a single lock, for no correctness gain.
+        - Storing leaves (:ref:`openedx-learning-adr-0005`) widens this gap rather than narrowing it:
+          the per-learner write volume is now roughly the per-course leaf fan-out larger, so
+          processing per learner without amortizing across learners costs more than it did before.
+    - Why rejected: the per-learner lock buys exactly one thing over the single deployment-wide lock,
+      per-learner parallelism, and pays for it with per-learner lock machinery and the loss of
+      cross-learner batching. While parallelism is not the binding constraint (the current
+      expectation, since one batch pipeline keeps up with peak grading) the single lock is simpler and
+      correct. When parallelism does become the binding constraint, keyed partitioning (alternative 1)
+      provides the same per-learner serialization as a structural property, lock-free and horizontally
+      scalable, which strictly beats a per-learner lock. There is no operating point at which the
+      per-learner lock is the best option, which is why it is not the chosen design and not the
+      escalation path. This was an earlier design for competency mastery recording; both the chosen
+      batch lock and keyed partitioning supersede it. See also alternative 2, which shows that keeping
+      the batching while moving evaluation outside a single lock collapses into either this
+      per-learner isolation or the write-skew.
 
 4. No lock; assume same-learner conflicts are rare and tolerate them.
     - Pros:
