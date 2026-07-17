@@ -39,15 +39,15 @@ For the initial implementation, versioning and traceability of competency achiev
 
 4. Authoring guardrails must warn on potentially impactful edits:
 
-   - If a user edits competency criteria definitions or competency object/tag associations after related learner status exists, Studio must display an explicit warning that student statuses have already been set, and these changes will be applied going forward, so existing learner statuses will not be retroactively updated.
+   - If a user edits competency criteria definitions or competency object/tag associations after related learner status exists, Studio must display an explicit warning that student statuses have already been set. Such edits are monotonic for the learner (:ref:`openedx-learning-adr-0005`): they never lower or revoke an existing status; a structural edit triggers a recompute that can only raise statuses (for example, eased criteria a learner already meets); and a rule or threshold change takes effect only going forward, as new grades arrive.
    - Applying these changes requires explicit user confirmation.
 
-5. Learner status models/tables are append-only history and do not use ``django-simple-history``:
+5. Learner status is stored as an ACTIVE table plus an append-only HISTORY table, using explicit tables rather than ``django-simple-history``:
 
-   - For ``StudentCompetencyCriteriaStatus``, ``StudentCompetencyCriteriaGroupStatus``, and ``StudentCompetencyStatus``, each status change is stored as a new row with ``created`` as the write timestamp.
-   - Existing learner status rows are not updated in place.
-   - Current status is determined by the most recent row for a given learner + target entity (ordered by ``created``, with ``id`` as a tie-breaker).
-   - Older rows represent the learner status history and remain available for audit/tracing.
+   - For each level (``StudentCompetencyCriteriaStatus``, ``StudentCompetencyCriteriaGroupStatus``, and ``StudentCompetencyStatus``), an ACTIVE table holds one current row per learner and node, updated in place, and a parallel append-only HISTORY table records one row per genuine status advance. The columns are defined in :ref:`openedx-learning-adr-0002`, Decision 6.
+   - Current status is a direct lookup on the ACTIVE row, not the most recent of many rows.
+   - A HISTORY row is written only when a status advances. Because mastery is monotonic and advance-only (:ref:`openedx-learning-adr-0005`), the number of advances per node is bounded by the status lattice, so HISTORY grows with learners and nodes, not with time, and still supports point-in-time reconstruction: the status at any past time is the latest advance at or before that time.
+   - These tables do not use ``django-simple-history``. The advance-only HISTORY is written explicitly by the recorder (:ref:`openedx-learning-adr-0004`) only on a genuine advance, and the recorder writes the ACTIVE and HISTORY tables in bulk. ``django-simple-history`` snapshots on every ``save`` and is oriented to per-row saves, which fits neither the advance-only bounding nor the bulk write path, and it adds history-metadata columns and per-save signal overhead this decision does not want on billion-row tables. It remains the right tool for the low-volume definition tables in Decision 1.
 
 
 Rejected Alternatives
@@ -83,3 +83,15 @@ Rejected Alternatives
     - Cons:
         - Requires custom tooling to reconstruct past versions
         - Does not align with existing publishable versioning patterns
+5. Append-only learner status only, with current status as the most recent row (the earlier form of this decision, before the ACTIVE/HISTORY split).
+    - Pros:
+        - No in-place mutation; a single table per level.
+    - Cons:
+        - Current-status reads must resolve the latest of several rows instead of a single-row lookup, on the dashboard hot path.
+        - There is no in-place current row to anchor per-learner concurrency (:ref:`openedx-learning-adr-0004`).
+6. Use ``django-simple-history`` for the learner status tables (as Decision 1 does for definition tables).
+    - Pros:
+        - Automatic shadow-table history with no hand-written HISTORY writes, consistent with the definition tables.
+    - Cons:
+        - It snapshots on every ``save``, so it cannot express advance-only HISTORY without extra suppression logic, and it does not fit the recorder's bulk write path.
+        - It adds history-metadata columns and per-save signal overhead that this decision avoids on billion-row tables.

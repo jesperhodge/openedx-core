@@ -20,8 +20,9 @@ three levels: the criterion (leaf), the criteria group, and the competency. Per
 fast. A single grade change therefore writes the changed leaf's status and then re-evaluates and
 re-writes the derived rows from that leaf up to the competency root. Per
 :ref:`openedx-learning-adr-0005`, each level is stored as an ACTIVE row updated in place, holding
-the current status for a learner and node, plus an append-only HISTORY row per applied change; this
-supersedes :ref:`openedx-learning-adr-0003`'s original all-append-only model.
+the current status for a learner and node, plus an append-only HISTORY row per genuine status
+advance (bounded by monotonicity); this supersedes :ref:`openedx-learning-adr-0003`'s original
+all-append-only model.
 
 How grade changes can reach openedx-core is constrained. openedx-core must never import from
 edx-platform and cannot read its grade tables, so grade changes can arrive only as
@@ -98,9 +99,10 @@ status is advanced and a HISTORY row written:
     - *Advance-only; no automatic regression.* Once a status reaches the demonstrated level it is
       retained ("banked"), at every level including the leaf (:ref:`openedx-learning-adr-0005`). The
       recorder records first attainment and advancements automatically but does not regress a banked
-      status below the demonstrated level, even for a legitimately newer downward grade correction; a
-      suppressed downward correction is still written to HISTORY as seen-and-suppressed. Reversing a
-      banked status is a separate administrative action, out of scope here.
+      status below the demonstrated level, even for a legitimately newer downward grade correction. A
+      downward correction does not advance the status, so it writes no HISTORY row; HISTORY records
+      only advances, which is what bounds it by monotonicity (:ref:`openedx-learning-adr-0005`).
+      Reversing a banked status is a separate administrative action, out of scope here.
 
 **Correctness by a single serializing batch lock.** One deployment-wide lock guards the whole
 drain-batch operation, so only one batch runs at a time across the deployment. The read,

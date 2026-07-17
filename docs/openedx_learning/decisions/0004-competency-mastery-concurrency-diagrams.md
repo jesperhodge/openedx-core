@@ -53,7 +53,7 @@ flowchart TD
     READ --> FOLD["Per learner: fold events in<br/>effective-source-timestamp order"]
     FOLD --> RULES["Per leaf, apply two rules"]
     RULES --> OOO["Out-of-order: ignore if older<br/>than current leaf timestamp"]
-    RULES --> ADV["Advance-only: never regress a banked<br/>status; suppressed events go to HISTORY"]
+    RULES --> ADV["Advance-only: never regress a banked<br/>status; downward corrections write no HISTORY row"]
     OOO --> WRITE["Bulk upsert ACTIVE +<br/>bulk append HISTORY<br/>(leaf and rolled-up levels)"]
     ADV --> WRITE
     WRITE --> UNLOCK["Release lock"]

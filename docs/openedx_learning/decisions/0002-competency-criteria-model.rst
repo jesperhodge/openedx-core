@@ -155,29 +155,58 @@ Decision
    3. ``oel_tagging_objecttag(object_id)``
    4. ``CompetencyCriteria(oel_tagging_objecttag_id)``
    5. ``CompetencyCriteria(competency_criteria_group_id)``
-   6. ``StudentCompetencyCriteriaStatus(user_id, competency_criteria_id)``
-   7. ``StudentCompetencyCriteriaGroupStatus(user_id, competency_criteria_group_id)``
-   8. ``StudentCompetencyStatus(user_id, oel_tagging_tag_id)``
-   9. ``CompetencyRuleProfile(competency_taxonomy_id, course_id, organization_id)``
-   10. ``CompetencyMasteryStatuses(status)`` (unique)
+   6. ``StudentCompetencyCriteriaStatus(user_id, competency_criteria_id)`` (unique; ACTIVE current row)
+   7. ``StudentCompetencyCriteriaGroupStatus(user_id, competency_criteria_group_id)`` (unique; ACTIVE current row)
+   8. ``StudentCompetencyStatus(user_id, oel_tagging_tag_id)`` (unique; ACTIVE current row)
+   9. ``StudentCompetencyCriteriaStatusHistory(user_id, competency_criteria_id, created)`` (point-in-time reconstruction)
+   10. ``StudentCompetencyCriteriaGroupStatusHistory(user_id, competency_criteria_group_id, created)``
+   11. ``StudentCompetencyStatusHistory(user_id, oel_tagging_tag_id, created)``
+   12. ``CompetencyRuleProfile(competency_taxonomy_id, course_id, organization_id)``
+   13. ``CompetencyMasteryStatuses(status)`` (unique)
 
 6. Learner progress status concepts (``StudentCompetency*Status`` database tables)
 
-   When a completion event (graded, completed, mastered, etc.) occurs for an object, determine and track the learner's status in earning the competency. To reduce recalculation frequency, store results at each level.
+   When a completion event (a subsection grade change, delivered as described in
+   :ref:`openedx-learning-adr-0004`) is evaluated for an object, determine and track the learner's
+   status in earning the competency. Results are stored at each level (leaf, group, competency) so
+   reads do not recompute. Each level is stored as two tables: an ACTIVE table holding one current
+   row per learner and node, updated in place, and an append-only HISTORY table that records one row
+   per genuine status advance. Current status is a direct lookup on the ACTIVE row; the HISTORY table
+   is the audit and point-in-time record. Because mastery is monotonic
+   (:ref:`openedx-learning-adr-0005`), the number of advances per node is bounded by the status
+   lattice, so the HISTORY tables grow with learners and nodes, not with time.
+
+   These are the large per-learner tables in this model, so they follow the scale posture of
+   :ref:`openedx-learning-adr-0005` (mirroring edx-platform's persistent grades): a 64-bit
+   ``BigAutoField`` primary key, narrow rows, per-read-path composite indexes (Decision 5), and a
+   dedicated database alias reached through a router that defaults to the main database. Their foreign
+   keys to the criteria-definition tables and to the user are logical references declared without
+   database-level constraints, so the tables can live in a different database from the definitions;
+   referential integrity and the delete protection of Decision 7 are enforced in application code.
 
    Relationship to other concepts:
 
-   - ``StudentCompetencyCriteriaStatus`` tracks status at ``CompetencyCriterion`` leaf level.
-   - ``StudentCompetencyCriteriaGroupStatus`` tracks status at ``CompetencyCriteriaGroup`` node level.
-   - ``StudentCompetencyStatus`` tracks top-level competency demonstration state.
-   - All learner status rows use a shared lookup table (``CompetencyMasteryStatuses``) so status semantics live in one place and student status tables stay structurally consistent.
+   - ``StudentCompetencyCriteriaStatus`` / ``StudentCompetencyCriteriaStatusHistory`` track status at
+     the ``CompetencyCriterion`` leaf level. A leaf is atomic, so its status is only ``Demonstrated``
+     or ``AttemptedNotDemonstrated``.
+   - ``StudentCompetencyCriteriaGroupStatus`` / ``StudentCompetencyCriteriaGroupStatusHistory`` track
+     status at the ``CompetencyCriteriaGroup`` node level.
+   - ``StudentCompetencyStatus`` / ``StudentCompetencyStatusHistory`` track top-level competency
+     demonstration state.
+   - All learner status rows use a shared lookup table (``CompetencyMasteryStatuses``) so status
+     semantics live in one place and the status tables stay structurally consistent.
 
-   Intended update flow (bottom-up materialization):
+   Intended update flow (bottom-up roll-up):
 
-   - A learner event updates one ``StudentCompetencyCriteriaStatus`` row.
-   - Recompute ancestor ``CompetencyCriteriaGroup`` statuses upward to the root.
-   - At each group, evaluate children in ``ordering`` sequence and short-circuit when the group's result is already determined by its ``logic_operator``.
-   - Persist only rows whose status changed.
+   - A learner event evaluates one leaf; if its status advances, its ACTIVE row is updated in place
+     and a leaf HISTORY row is appended.
+   - Recompute ancestor ``CompetencyCriteriaGroup`` statuses upward to the root, reading the stored
+     child rows directly.
+   - At each group, evaluate children in ``ordering`` sequence and short-circuit when the group's
+     result is already determined by its ``logic_operator``.
+   - Persist only nodes whose status changed: update the ACTIVE row in place and append a HISTORY row.
+     A banked (``Demonstrated``) status is never regressed, so a downward grade correction advances
+     nothing and writes no HISTORY row.
 
    1. Add new database table for ``CompetencyMasteryStatuses`` with these columns:
 
@@ -188,34 +217,51 @@ Decision
 
       - This table is system-owned lookup data and should be treated as immutable configuration, not user-authored rows.
 
-   2. Add new database table for ``StudentCompetencyCriteriaStatus`` with these columns:
+   2. Add the leaf-level tables ``StudentCompetencyCriteriaStatus`` (ACTIVE) and
+      ``StudentCompetencyCriteriaStatusHistory`` (HISTORY). Both tables have these columns:
 
-      1. ``id``: unique primary key
-      2. ``competency_criteria_id``: Foreign key to ``CompetencyCriterion.id``
-      3. ``user_id``: Foreign key pointing to user_id (presumably the learner's id, although it appears that it is possible for staff to get grades as well) in ``auth_user`` table
-      4. ``status_id``: Foreign key to ``CompetencyMasteryStatuses.id``
-      5. ``created``: The timestamp at which the student's criterion status was set.
+      1. ``id``: 64-bit ``BigAutoField`` primary key
+      2. ``competency_criteria_id``: logical foreign key to ``CompetencyCriterion.id`` (no database-level constraint)
+      3. ``user_id``: logical foreign key to the learner's user id (no database-level constraint)
+      4. ``status_id``: foreign key to ``CompetencyMasteryStatuses.id``
+      5. ``effective_source_timestamp``: the timestamp of the grade change this status was computed from, used for the out-of-order defense in :ref:`openedx-learning-adr-0004`
+      6. ``created``: on ACTIVE, when the row was first written; on HISTORY, when this advance was appended
 
-   3. Add a new database table for ``StudentCompetencyCriteriaGroupStatus`` with these columns:
+      The ACTIVE table additionally has a ``modified`` timestamp (last in-place update) and is unique
+      on ``(user_id, competency_criteria_id)`` (one current row per learner and leaf). The HISTORY
+      table has no such uniqueness constraint: it holds one row per advance and is not written for a
+      suppressed downward correction.
 
-      1. ``id``: unique primary key
-      2. ``competency_criteria_group_id``: Foreign key to ``CompetencyCriteriaGroup.id``
-      3. ``user_id``: Foreign key pointing to user_id (presumably the learner's id, although it appears that it is possible for staff to get grades as well) in ``auth_user`` table
-      4. ``status_id``: Foreign key to ``CompetencyMasteryStatuses.id``
-      5. ``created``: The timestamp at which the student's criteria-group status was set.
+   3. Add the group-level tables ``StudentCompetencyCriteriaGroupStatus`` (ACTIVE) and
+      ``StudentCompetencyCriteriaGroupStatusHistory`` (HISTORY). Both tables have these columns:
 
-   4. Add a new database table for ``StudentCompetencyStatus`` with these columns:
+      1. ``id``: 64-bit ``BigAutoField`` primary key
+      2. ``competency_criteria_group_id``: logical foreign key to ``CompetencyCriteriaGroup.id`` (no database-level constraint)
+      3. ``user_id``: logical foreign key to the learner's user id (no database-level constraint)
+      4. ``status_id``: foreign key to ``CompetencyMasteryStatuses.id``
+      5. ``effective_source_timestamp``: as in the leaf tables
+      6. ``created``: as in the leaf tables
 
-      1. ``id``: unique primary key
-      2. ``oel_tagging_tag_id``: Foreign key pointing to Tag id
-      3. ``user_id``: Foreign key pointing to user_id (presumably the learner's id, although it appears that it is possible for staff to get grades as well) in ``auth_user`` table
-      4. ``status_id``: Foreign key to ``CompetencyMasteryStatuses.id``. This table should have a constraint to only allow status values of “Demonstrated” and “PartiallyAttempted” since it represents overall competency demonstration state, not in-progress states.
-      5. ``created``: The timestamp at which the student's competency status was set.
+      The ACTIVE table additionally has a ``modified`` timestamp and is unique on
+      ``(user_id, competency_criteria_group_id)``.
+
+   4. Add the competency-level tables ``StudentCompetencyStatus`` (ACTIVE) and
+      ``StudentCompetencyStatusHistory`` (HISTORY). Both tables have these columns:
+
+      1. ``id``: 64-bit ``BigAutoField`` primary key
+      2. ``oel_tagging_tag_id``: logical foreign key to the competency ``Tag`` id (no database-level constraint)
+      3. ``user_id``: logical foreign key to the learner's user id (no database-level constraint)
+      4. ``status_id``: foreign key to ``CompetencyMasteryStatuses.id``. Constrained to “Demonstrated” and “PartiallyAttempted” only, since this represents overall competency demonstration state, not in-progress states.
+      5. ``effective_source_timestamp``: as in the leaf tables
+      6. ``created``: as in the leaf tables
+
+      The ACTIVE table additionally has a ``modified`` timestamp and is unique on
+      ``(user_id, oel_tagging_tag_id)``.
 
 7. Delete protection boundaries
 
    - If no learner status rows exist for a competency definition, hard delete is allowed and cascades through competency metadata tables.
-   - Once any related learner status exists in ``StudentCompetencyStatus``, ``StudentCompetencyCriteriaGroupStatus``, or ``StudentCompetencyCriteriaStatus``, deletion of associated competency definition rows is blocked.
+   - Once any related learner status exists (an ACTIVE or HISTORY row at any level), deletion of associated competency definition rows is blocked. Because the learner-status foreign keys carry no database-level constraint (Decision 6), this protection is enforced in application code, not by a database cascade or constraint.
    - This delete protection applies to ``oel_tagging_taxonomy``, ``CompetencyTaxonomy``, ``oel_tagging_tag``, ``oel_tagging_objecttag``, ``CompetencyCriteriaGroup``, ``CompetencyCriteria``, and ``CompetencyRuleProfile``.
    - Once any related learner status exists, retiring definitions may be archive-only (hidden from authoring and new associations), not hard delete.
 
@@ -223,6 +269,15 @@ Decision
    :alt: Competency Criteria Model
    :width: 80%
    :align: center
+
+.. note::
+
+   The PNG above is the original overview. It predates the ACTIVE/HISTORY split introduced here and
+   in :ref:`openedx-learning-adr-0005`, and it shows a ``mastery_level_id`` column on
+   ``StudentCompetencyCriteriaStatus`` that is not part of this decision (mastery level is a future
+   rule type). The current data model, including the ACTIVE and HISTORY tables, is diagrammed in
+   ``0002-competency-criteria-model-diagram.md``, which is authoritative where it differs from the
+   PNG.
 
 
 Example
