@@ -7,16 +7,21 @@ Status
 ------
 Proposed. Contingent on a cross-repo prerequisite (see `Prerequisite`_).
 
+A companion set of diagrams for this decision lives alongside it in
+``0004-competency-mastery-concurrency-diagrams.md``.
+
 Context
 -------
 When a learner is graded on a subsection, the platform must evaluate whether that grade
 demonstrates any attached competencies and record the learner's mastery. Mastery is recorded at
 three levels: the criterion (leaf), the criteria group, and the competency. Per
-:ref:`openedx-learning-adr-0002`, the group and competency levels are *materialized* (stored),
-not recomputed on read, so that dashboards and other read surfaces stay fast. A single grade
-change therefore has to recompute and re-write the derived rows from the changed leaf up to the
-competency root. Per :ref:`openedx-learning-adr-0003`, every status table is append-only: a change
-is a new row, and the current status is the most recent row for a learner and entity.
+:ref:`openedx-learning-adr-0002` and :ref:`openedx-learning-adr-0005`, all three levels are
+*materialized* (stored), not recomputed on read, so that dashboards and other read surfaces stay
+fast. A single grade change therefore writes the changed leaf's status and then re-evaluates and
+re-writes the derived rows from that leaf up to the competency root. Per
+:ref:`openedx-learning-adr-0005`, each level is stored as an ACTIVE row updated in place, holding
+the current status for a learner and node, plus an append-only HISTORY row per applied change; this
+supersedes :ref:`openedx-learning-adr-0003`'s original all-append-only model.
 
 How grade changes can reach openedx-core is constrained. openedx-core must never import from
 edx-platform and cannot read its grade tables, so grade changes can arrive only as
@@ -31,12 +36,12 @@ bus is present.
 Two forces shape how this recording should happen:
 
 - **Same-learner correctness.** Grade-change events arrive asynchronously and can be delivered out
-  of order and processed on more than one worker. Because writes are append-only, two evaluations
-  for the same learner that overlap can each read a stale snapshot of the sibling leaf statuses and
-  each append a derived roll-up computed from an incomplete picture (a write-skew). Leaf rows are
-  always correct, since each leaf is a pure function of its own grade; only the derived
-  group/competency rows can be left wrong. Nothing crashes and no constraint is violated, but a
-  learner's stored competency status can be silently incorrect.
+  of order and processed on more than one worker. Two evaluations for the same learner that overlap
+  can each read a stale snapshot of the sibling leaf statuses and each write a derived roll-up
+  computed from an incomplete picture (a write-skew). Leaf rows are always correct, since each leaf
+  is a pure function of its own grade; only the derived group/competency rows can be left wrong.
+  Nothing crashes and no constraint is violated, but a learner's stored competency status can be
+  silently incorrect.
 
 - **Throughput.** Grading is bursty and spans a very large number of learners, so the recording
   path must keep up without paying a serialization or per-event transaction cost that grows with
@@ -76,21 +81,26 @@ the producer to "one more row in a table," and makes the durable inbox write, no
 the step that must succeed for an event not to be lost.
 
 **Recording pipeline.** Resolving which competencies a subsection feeds is learner-independent, so
-it is cached and de-duplicated across the batch. Each batch does one bulk read of current statuses,
-evaluates in memory, and does one bulk append, collapsing per-event transaction overhead into a
-small, fixed number of round-trips. The in-memory engine (:ref:`openedx-learning-adr-0002`) is
-unchanged: to apply several of one learner's events, the recorder folds them in
-effective-source-timestamp order against an evolving snapshot. Persistence stays append-only
-(:ref:`openedx-learning-adr-0003`). Two rules govern whether a new status row is written:
+it is cached and de-duplicated across the batch. Each batch does one bulk read of current ACTIVE
+statuses, evaluates in memory, and then, in a small fixed number of round-trips, bulk-upserts the
+changed ACTIVE rows and bulk-appends the HISTORY rows, at the leaf level and every rolled-up level
+it touches. The number of round-trips per batch is fixed regardless of how many leaves the batch
+covers, which is what keeps the higher per-batch row count of stored leaves (see the stored-leaf
+performance note below) from turning into per-row overhead. The in-memory engine
+(:ref:`openedx-learning-adr-0002`) is unchanged: to apply several of one learner's events, the
+recorder folds them in effective-source-timestamp order against an evolving snapshot. Persistence
+follows :ref:`openedx-learning-adr-0005`'s ACTIVE-plus-HISTORY split. Two rules govern whether a
+status is advanced and a HISTORY row written:
 
     - *Out-of-order defense.* A change is ignored when its effective source timestamp is older than
       the current leaf's, so a late arrival cannot regress a newer status. This is a
       delivery-ordering guarantee, distinct from the next rule.
     - *Advance-only; no automatic regression.* Once a status reaches the demonstrated level it is
-      retained ("banked"). The recorder appends first attainment and advancements automatically but
-      does not auto-append a regression below an already-demonstrated status, even for a
-      legitimately newer downward grade correction. Reversing a banked status is a separate
-      administrative action, out of scope here.
+      retained ("banked"), at every level including the leaf (:ref:`openedx-learning-adr-0005`). The
+      recorder records first attainment and advancements automatically but does not regress a banked
+      status below the demonstrated level, even for a legitimately newer downward grade correction; a
+      suppressed downward correction is still written to HISTORY as seen-and-suppressed. Reversing a
+      banked status is a separate administrative action, out of scope here.
 
 **Correctness by a single serializing batch lock.** One deployment-wide lock guards the whole
 drain-batch operation, so only one batch runs at a time across the deployment. The read,
@@ -111,6 +121,19 @@ observed.
 
 **Latency.** Recording is expected to lag grading by minutes, not to be real-time; the dashboards
 this feeds tolerate that. The producer's interval is a deployment setting with a documented floor.
+
+**Performance of stored leaves.** :ref:`openedx-learning-adr-0005` stores leaf mastery, so a batch
+now writes on the order of the per-course leaf fan-out (up to ~200x) more rows than a
+group-and-competency-only design would. This does not change the shape of the pipeline: the writes
+are bulk (one bulk upsert of ACTIVE rows and one bulk append of HISTORY rows per level), so the
+number of statements and the time held under the lock scale with batch size, not with the number of
+learners or leaves inside a statement. The lock serializes whole batches, not rows, so the extra
+rows add bulk-write time within a batch rather than lock contention between batches. The single
+serialized pipeline remains adequate while one batch keeps up with peak grading; the higher leaf
+write volume lowers the headroom before that ceiling relative to the transient-leaf design, and the
+sustained-growth revisit noted below applies all the more. Batch size is the primary tuning knob,
+and the mass recompute from a structural criteria edit is chunked and rate-limited
+(:ref:`openedx-learning-adr-0005`) so it cannot crowd out live recording.
 
 Accepted tradeoffs:
 
@@ -173,7 +196,7 @@ Rejected Alternatives
     - Why rejected: the lock exists to make each learner's read-evaluate-write atomic against other
       writers, not to protect the I/O. Moving evaluation outside the lock reintroduces the exact
       write-skew from the Context: two workers read the same snapshot for one learner, both
-      evaluate, and both append a roll-up from an incomplete picture. Making parallel evaluation
+      evaluate, and both write a roll-up from an incomplete picture. Making parallel evaluation
       correct requires that each learner is only ever handled by one worker at a time, which is
       per-learner isolation, i.e. the keyed-partitioning alternative above. This is therefore not a
       distinct option: with the isolation added it becomes keyed partitioning; without it, it is
@@ -202,7 +225,7 @@ Rejected Alternatives
 4. No lock; assume same-learner conflicts are rare and tolerate them.
     - Pros:
         - The least machinery of any option: no lock, no partitioning-for-correctness, relying on
-          append-only self-healing and a reconciliation job.
+          eventual self-healing on the next event and a reconciliation job.
     - Cons:
         - Correctness becomes best-effort. A concurrent same-learner conflict can leave a transient
           wrong derived status.
