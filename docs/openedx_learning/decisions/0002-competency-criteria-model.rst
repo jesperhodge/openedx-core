@@ -81,7 +81,7 @@ Decision
    4. ``course_id``: Nullable foreign key to ``openedx_catalog_courserun.id`` for the course that scopes this criteria tree.
    5. ``name``: string
    6. ``ordering``: Indicates evaluation sequence number for this criteria group. This defines deterministic evaluation order for siblings during read-time evaluation and event-driven recomputation, and enables short-circuit evaluation.
-   7. ``logic_operator``: Either “AND” or “OR” or null. This determines how children are combined at a group node ("AND" or "OR").
+   7. ``logic_operator``: Either “AND” or “OR” or null. This determines how children are combined at a group node ("AND" or "OR"). Deliberately no negation operator: keeping every combinator monotone (advancing a child status can only advance or leave unchanged its parent, never regress it) is what lets :ref:`openedx-learning-adr-0004` record concurrently without coordination.
 
    Example: A root group uses "OR" with two child groups.
 

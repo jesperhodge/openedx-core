@@ -28,38 +28,43 @@ flowchart TD
     RCV --> API
 ```
 
-## 2. Why it is correct without a lock
+## 2. Why it is correct: one transaction, monotone merge, brief per-node row lock
 
 Every write is `status := max(stored, computed)`, so writes commute, repeat harmlessly, and never
-regress. A conjunctive parent computed from a stale sibling view can be too low but never too high;
-the re-evaluation triggered by the last child to commit reads every committed sibling and merges the
-parent up to the correct value. Result: eventually correct, never over-stated, no coordination.
+regress. A leaf is a single value, so its atomic merge needs no extra lock. A conjunctive parent is
+computed by reading several children first, so recomputing it takes a brief `SELECT ... FOR UPDATE`
+on the parent row: two updates that touch the same parent for the same learner take turns, and the
+second reads the first's committed children and computes from the complete picture. This is an
+ordinary single-row lock, not the deployment-wide lock the previous design used.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant WA as Worker A (child L1)
-    participant WB as Worker B (child L2)
+    participant WA as Worker A (child L1 advances)
+    participant WB as Worker B (child L2 advances)
     participant DB as Mastery tables (ACTIVE + HISTORY)
 
-    Note over WA,WB: L1 and L2 are siblings under conjunctive parent G
-    WA->>DB: merge L1 up; commit
-    WB->>DB: merge L2 up; commit (last committer)
-    WA->>DB: re-evaluate G from committed children<br/>(sees L1 new, L2 maybe stale) → may be too low
-    WB->>DB: re-evaluate G from committed children<br/>(sees L1 and L2 committed) → correct
-    Note over DB: max-merge keeps the higher value → G converges to correct, never over-stated
+    Note over WA,WB: L1 and L2 are siblings under conjunctive parent G, same learner
+    WA->>DB: merge L1 (atomic max)
+    WB->>DB: merge L2 (atomic max)
+    WA->>DB: SELECT G FOR UPDATE (acquires row lock)
+    WB->>DB: SELECT G FOR UPDATE (waits for A)
+    WA->>DB: read children (L1, L2), merge G, commit → releases lock
+    WB->>DB: now reads L1 and L2 committed, merges G → correct
+    Note over DB: locks taken child-before-parent up to root → no deadlock
 ```
 
-## 3. Optional monotone backstop
+## 3. Recovering a lost delivery (Option B): trailing-overlap re-scan
 
-The only way step 2 leaves a parent low is a lost re-evaluation trigger. A periodic monotone
-re-derivation repairs that: because it can only advance a status, it fixes a stalled parent without
-ever corrupting one. It is not a correcting reconciliation (which a non-monotone design would need),
-and can be omitted until lost triggers are actually observed.
+Option A cannot lose a change (mastery shares the grade transaction). Option B carries it over an
+in-process signal that can be dropped silently. The producer re-reads a short overlap window behind
+its watermark each cycle, so a dropped change is re-emitted next cycle; the monotone merge makes the
+re-delivery a no-op if it was already recorded. No reconciliation command and no correcting sweep.
 
 ```mermaid
 flowchart LR
-    SWEEP["Periodic re-derivation<br/>(optional)"] --> READ["Read committed children"]
-    READ --> MERGE["status := max(stored, recomputed)"]
-    MERGE --> SAFE["Advances a stalled parent;<br/>never regresses a correct one"]
+    WM["Watermark T"] --> SCAN["Query grades changed since (T - overlap)"]
+    SCAN --> EMIT["Emit signal/event per change"]
+    EMIT --> MERGE["Recorder: monotone merge<br/>(re-delivery of a recorded change is a no-op)"]
+    SCAN --> ADV["Advance watermark → next scan stays a short-window seek"]
 ```

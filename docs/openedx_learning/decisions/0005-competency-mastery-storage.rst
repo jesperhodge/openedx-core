@@ -149,11 +149,14 @@ work, and consciously declines the ones edx-platform did not need:
       effective-source-timestamp out-of-order defense in :ref:`openedx-learning-adr-0004`
       (mirroring edx-platform's check of the source score's timestamp before trusting a queued
       recompute).
-    - *Batch the read and write paths.* The recorder reads current statuses in bulk and writes leaf
-      ACTIVE (bulk upsert), leaf HISTORY (``bulk_create``), and the rolled-up group/competency rows
-      in a small, fixed number of round-trips per batch, independent of the number of rows in the
-      batch. This is the same "prefetch per cohort, bulk-write" posture edx-platform uses and is the
-      mechanism by which :ref:`openedx-learning-adr-0004`'s single serialized pipeline keeps up.
+    - *Batch the read and write paths, where batching is used.* When a deployment adopts the
+      optional batching described in :ref:`openedx-learning-adr-0004`, the recorder reads current
+      statuses in bulk and writes leaf ACTIVE (bulk upsert), leaf HISTORY (``bulk_create``), and the
+      rolled-up group/competency rows in a small, fixed number of round-trips per batch, independent
+      of the number of rows in the batch. This is the same "prefetch per cohort, bulk-write" posture
+      edx-platform uses. Recording is correct without batching too (:ref:`openedx-learning-adr-0004`'s
+      monotone merge does not depend on it); batching is a throughput optimization for high-volume
+      deployments, not a correctness mechanism.
     - *Chunk mass recompute and provide a kill switch.* The bulk recompute triggered by a
       structural criteria edit is chunked by a configurable batch size and can be halted by an
       operational switch, mirroring edx-platform's ``ComputeGradesSetting`` batch size and its

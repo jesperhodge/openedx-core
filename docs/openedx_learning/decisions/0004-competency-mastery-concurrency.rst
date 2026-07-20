@@ -60,9 +60,11 @@ in-process delivery, without making the event bus mandatory.
 
 Decision
 --------
-Recording is made **coordination-free** by leaning on the monotonicity above: no lock, no
-serialized pipeline, no partitioning-for-correctness. Two mechanisms provide correctness, and they
-are what any entry point below must implement.
+Recording avoids global coordination by leaning on the monotonicity above: no deployment-wide lock,
+no serialized pipeline, no partitioning-for-correctness. Concurrent same-learner writes are made
+safe by a monotone merge plus a brief row-level lock on the one node being recomputed, not by
+serializing the whole recorder. Two mechanisms provide correctness, and they are what any entry
+point below must implement.
 
 **1. Every write is a monotone merge, never a blind overwrite.** A node's status is written as
 ``status := max(stored status, newly computed status)`` (a single ``GREATEST``-style ``UPDATE``,
@@ -72,23 +74,19 @@ order: applying the same set of advances in any order, and re-applying any of th
 result. A late or duplicate delivery carries a status no higher than what is stored, so it is a
 no-op. This is why out-of-order delivery and re-delivery are harmless without sequence tracking.
 
-**2. When a child advances, its parent is re-evaluated from the committed children.** The merge in
-mechanism 1 makes a single write safe, but a *conjunctive* parent (for example "demonstrated only
-when all children are demonstrated") can still be computed from a stale view of its siblings. Two
-overlapping evaluations for one learner can each see only their own child's advance and each
-compute a parent value that is too low, never too high. To close that gap, every child advance
-re-evaluates the parent reading the *committed* child rows, and propagates upward if the parent
-advances. Commits are serialized by the database, so there is always a last committer, and the
-re-evaluation it triggers reads every sibling's committed value and merges the parent up to the
-correct result. Derived rows are therefore *eventually correct and never over-stated*, with no
-coordination between workers. In the language of the CALM theorem, a monotone computation needs no
-coordination.
-
-The only way mechanism 2 can leave a parent low is if the last re-evaluation is never run (a lost
-trigger). An optional monotone re-derivation sweep is a sound backstop: because it can only advance
-a status, it repairs a stalled parent without ever corrupting one. It is not the "reconciliation to
-fix wrong values" that a non-monotone design would need; it is belt-and-suspenders for a dropped
-trigger, and can be omitted until lost triggers are actually observed.
+**2. When a child advances, its parent is recomputed in the same transaction, under a brief row
+lock on that parent.** The merge in mechanism 1 makes a single-row write safe, but a *conjunctive*
+parent (for example "demonstrated only when all children are demonstrated") is computed by reading
+several child rows first, so two overlapping evaluations for one learner could each read a stale
+sibling and compute a parent that is too low. To prevent that, recomputing a parent takes a
+row-level lock on the parent row (a ``SELECT ... FOR UPDATE``) before reading its children: two
+updates that touch the same parent for the same learner take turns, and the second reads the first's
+committed children and computes from the complete picture. Locks are taken child-before-parent up
+the path to the root, a consistent order, so concurrent updates cannot deadlock. This is an ordinary
+single-row lock, the same serialization any two concurrent writes to one row already incur; it is
+*not* the deployment-wide lock the previous design used, and it only ever contends when two grade
+changes for the *same learner and same node* land at once, which is rare. Because every write only
+advances a status, the result is correct and never over-stated, with no global coordination.
 
 Two rules govern whether a status advances and a HISTORY row is written; both fall out of
 monotonicity:
@@ -113,12 +111,12 @@ write. The choice is a follow-up decision.
     database, which makes grade and mastery genuinely atomic.
 
         - Pros: grade and mastery can never diverge; recording is real-time; no new event type is
-          needed, only a call from code that already runs.
+          needed, only a call from code that already runs; and because the leaf and its ancestors
+          recompute in that same transaction (mechanism 2), the whole subtree is airtight inline with
+          no follow-up step.
         - Cons: mastery work sits on the synchronous grading path, so a slow mastery query or a bug
-          adds latency to, or rolls back, the grade write (grades are the more critical data);
-          requires the shared database; and a conjunctive parent still needs a post-commit
-          re-evaluation (mechanism 2) to be airtight, so Option A is not purely inline unless it
-          accepts "heals on the learner's next event."
+          adds latency to, or rolls back, the grade write (grades are the more critical data); and it
+          requires the shared database.
 
     **Option B: record from a subsection-grade-changed signal received in openedx-core.**
     edx-platform emits a subsection-granular signal or event; an openedx-core receiver does the
@@ -128,10 +126,10 @@ write. The choice is a follow-up decision.
           grade writes; all mastery logic lives in openedx-core, which is the correct owner; no
           shared-database requirement.
         - Cons: not atomic with the grade write, so there is a brief window where the grade is
-          written but mastery is not yet (acceptable because mastery is already eventually
-          consistent and monotone); needs a new subsection-granular event
-          (see `Prerequisite`_); and in-process delivery is best-effort, so it relies on the
-          durability backstop below.
+          written but mastery is not yet (acceptable because mastery lags but never contradicts the
+          grade); needs a new subsection-granular event (see `Prerequisite`_); and in-process
+          delivery is best-effort, so a dropped signal must be recovered by the re-scan in decision 3
+          below.
 
 **Throughput and optional batching.** Because writes commute (mechanism 1), throughput no longer
 depends on a single serialized pipeline. Under Option B, more consumer workers can run in parallel;
@@ -160,22 +158,44 @@ statuses, evaluates in memory, and bulk-writes the changed ACTIVE and HISTORY ro
 with batching it lags by the producer interval plus drain time. The dashboards this feeds tolerate
 minutes.
 
-**Durability.** In-process delivery swallows receiver exceptions, so a dropped event could be lost
-silently. Under Option B the producer (batched or per-change) re-scans a trailing overlap window
-behind its watermark each cycle so a missed row is re-emitted, and the monotone merge makes
-re-delivery a no-op. Under Option A the atomic transaction is the durability guarantee. An on-demand
-reconciliation command is provided as an operator escape hatch; a permanent scheduled sweep is not
-required (see the optional monotone backstop above).
+**Transactions and durability.** Three points, each a deliberate part of this decision:
+
+    1. *One atomic transaction per grade change, in both options.* A change is recorded in a single
+       transaction that merges the leaf and recomputes its ancestors to the root (mechanism 2). The
+       options differ only in what else shares that transaction: under Option A the subsection grade
+       write is inside it, so grade and mastery commit or roll back together; under Option B the
+       grade is already committed and the transaction covers the mastery write alone. Either way the
+       mastery write is never half-applied.
+
+    2. *No reconciliation for correctness.* Same-learner concurrency is fully handled by mechanisms 1
+       and 2, so there is nothing to reconcile after the fact: a monotone merge cannot be corrupted
+       by a concurrent writer, and the row-locked parent recompute always reads a complete, committed
+       picture. This is the key difference from a non-monotone design, which would need a correcting
+       sweep to converge. No such sweep, and no on-demand fix command, is part of this decision.
+
+    3. *Recovering a lost delivery (Option B only).* Option A cannot lose a change, because the
+       mastery write shares the grade transaction. Option B carries the change over a separate
+       in-process signal, and in production a receiver exception is swallowed and logged, so a signal
+       can be dropped silently. Recovery is a *trailing-overlap re-scan*: the producer tracks a
+       watermark (how far it has read) and each cycle queries grades changed since a few minutes
+       *before* the watermark, not exactly since it, so the most recent few minutes of changes are
+       always re-read. A change whose signal was dropped is re-emitted on the next cycle, and the
+       monotone merge makes the re-delivery a no-op if it was in fact already recorded. The watermark
+       still advances, so the query stays a cheap short-window scan, not a full-table scan. A
+       deployment that runs Option B with no producer at all (pure per-change signals) instead relies
+       on the change healing the next time that leaf is graded; if that is not acceptable it runs the
+       lightweight periodic re-scan.
 
 Accepted tradeoffs:
 
-    - Correctness is *eventual*, not point-in-time: a reader can briefly observe a derived status
-      that is too low, between a child's commit and its parent's re-evaluation. It is never too
-      high, and it converges. Consumers that need an exactly-consistent-at-all-times roll-up are
-      not served by this design.
+    - Mastery is internally consistent, since the leaf and its roll-ups move together in one
+      transaction (mechanism 2), but under Option B it lags the grade: a reader can briefly see an
+      updated grade whose mastery is not yet recorded. Mastery is never over-stated and never
+      contradicts a committed grade; it only trails it. Option A has no such lag. Consumers that need
+      mastery exactly in step with the grade at all times should use Option A.
     - Mastery is a high-water mark. A downward or revoked grade never lowers it; un-mastering is a
       deliberate out-of-band action. This is inherited from :ref:`openedx-learning-adr-0005` and is
-      the property that buys the coordination-free write path.
+      the property that removes the deployment-wide lock from the write path.
     - Correctness depends on criteria staying monotone (no negation in
       :ref:`openedx-learning-adr-0002`'s trees). If a future criteria feature introduces negation,
       that node's parent is no longer monotone and this design does not cover it.
@@ -198,11 +218,13 @@ documentation listing the migration as a non-goal is correspondingly superseded.
 Rejected Alternatives
 ---------------------
 
-1. Serialize all writers with a lock (the previous form of this decision).
+1. Serialize all writers with a deployment-wide lock (the previous form of this decision).
 
     Record under a single deployment-wide lock (or a per-learner lock), so no two workers ever
     evaluate the same learner at once and the write-skew cannot occur. This was the earlier design
-    for competency mastery recording.
+    for competency mastery recording. This alternative is about the *global* serialization lock, not
+    the brief per-node row lock the chosen design uses in mechanism 2, which is a different and far
+    cheaper primitive.
 
     - Pros:
         - Correct regardless of delivery order or topology, without depending on monotonicity.
@@ -215,12 +237,12 @@ Rejected Alternatives
           cross-learner batching that throughput would otherwise rely on.
         - Either way it introduces a lock and its failure modes for a guarantee monotonicity already
           provides.
-    - Why rejected: the write-skew a lock exists to prevent is a consequence of computing derived
-      rows non-monotonically. Once every write is a monotone merge and every child advance
-      re-evaluates its parent, concurrent same-learner evaluations converge on their own, so the
-      lock guards against a hazard that no longer exists. Removing it also restores horizontal
-      scalability that the locked design gave up. The lock is strictly more machinery for strictly
-      less throughput.
+    - Why rejected: the write-skew a global lock exists to prevent is a consequence of computing
+      derived rows non-monotonically. Once every write is a monotone merge (mechanism 1) and each
+      parent recompute is serialized only against concurrent writers of that same node by a brief row
+      lock (mechanism 2), correctness holds without serializing the whole recorder. The deployment-wide
+      lock forces a single pipeline and gives up horizontal scale to buy a guarantee that a per-node
+      row lock already provides at a fraction of the cost.
 
 2. Allow non-monotonic mastery and repair drift with a reconciliation sweep.
 
@@ -232,14 +254,15 @@ Rejected Alternatives
         - Mastery tracks the current grade exactly, including downward corrections, with no
           high-water-mark surprise.
     - Cons:
-        - Gives up the coordination-free property: a non-monotone merge is not order-insensitive, so
-          concurrent writers can corrupt (not merely understate) a derived row.
+        - Gives up order-insensitivity: a non-monotone merge depends on the order writes arrive, so
+          concurrent writers can corrupt (not merely understate) a derived row, and a brief row lock
+          no longer suffices to keep them correct.
         - Requires an always-on correcting reconciliation process to converge, the kind of standing
           cost this decision avoids.
-    - Why rejected: monotonicity is the linchpin that makes the lock-free write path correct.
-      Trading it away to track downward corrections reintroduces exactly the coordination problem
-      this decision removes, and the product treats mastery as banked anyway
-      (:ref:`openedx-learning-adr-0005`).
+    - Why rejected: monotonicity is the linchpin that keeps the write path correct with only a brief
+      per-node row lock and no global serialization. Trading it away to track downward corrections
+      reintroduces exactly the coordination problem this decision removes, and the product treats
+      mastery as banked anyway (:ref:`openedx-learning-adr-0005`).
 
 3. Overwrite derived rows with the freshly computed value instead of a monotone merge.
 
@@ -282,7 +305,7 @@ Rejected Alternatives
 
     - Pros:
         - The bus is a durable buffer with native batch polling and at-least-once delivery, closing
-          the durability gap without an inbox or reconciliation command.
+          Option B's delivery gap without relying on the trailing-overlap re-scan.
     - Cons:
         - The event bus is not enabled in a stock edx-platform deployment, so requiring it makes
           Kafka or Redis mandatory infrastructure for any deployment that wants competencies.
