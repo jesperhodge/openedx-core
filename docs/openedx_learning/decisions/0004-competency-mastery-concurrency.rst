@@ -21,348 +21,282 @@ fast. A single grade change therefore writes the changed leaf's status and then 
 re-writes the derived rows from that leaf up to the competency root. Per
 :ref:`openedx-learning-adr-0005`, each level is stored as an ACTIVE row updated in place, holding
 the current status for a learner and node, plus an append-only HISTORY row per genuine status
-advance (bounded by monotonicity); this supersedes :ref:`openedx-learning-adr-0003`'s original
-all-append-only model.
+advance.
 
-How grade changes can reach openedx-core is constrained. openedx-core must never import from
-edx-platform and cannot read its grade tables, so grade changes can arrive only as
-``openedx-events`` events. The only grade event that exists today is course-level and carries no
-subsection identifier, so recording at subsection granularity needs a new event that edx-platform
-does not yet emit (see `Prerequisite`_). ``openedx-events`` also delivers in-process by default,
-because the event bus is not enabled in a stock deployment: a receiver runs synchronously in the
-producer's worker and, in production, a receiver exception is swallowed and logged rather than
-retried. Delivery is therefore best-effort, not durable, and the recorder cannot assume the event
-bus is present.
+**The property this decision rests on: mastery only ever moves forward.** Per
+:ref:`openedx-learning-adr-0005`, every node, at every level, advances through a small status
+lattice (``AttemptedNotDemonstrated`` to ``PartiallyAttempted`` to ``Demonstrated``) and is never
+regressed automatically. A status is a high-water mark: once banked it stays, even when a later
+grade correction is lower. This is a domain rule, not an implementation convenience, and the rest
+of this decision is built on it. It holds only while the criteria that combine child statuses into
+a parent are *monotone* boolean functions (AND, OR, k-of-n thresholds), so that advancing any child
+can only advance the parent. :ref:`openedx-learning-adr-0002`'s criteria trees contain no negation,
+which is the assumption that keeps parents monotone; a ``NOT`` node would break it.
 
-Two forces shape how this recording should happen:
+How grade changes reach openedx-core is constrained by layering. openedx-core must never import from
+edx-platform and cannot read its grade tables. edx-platform is the higher layer and may depend on
+openedx-core, so a grade change is *pushed* into openedx-core by edx-platform, either as a
+synchronous call into an openedx-core recording API or as an ``openedx-events`` event. What
+openedx-core may not do is reach back to read grades itself. ``openedx-events`` also delivers
+in-process by default, because the event bus is not enabled in a stock deployment: a receiver runs
+synchronously in the producer's worker and, in production, a receiver exception is swallowed and
+logged rather than retried. In-process delivery is therefore best-effort, not durable, and the
+recorder cannot assume the event bus is present.
 
-- **Same-learner correctness.** Grade-change events arrive asynchronously and can be delivered out
-  of order and processed on more than one worker. Two evaluations for the same learner that overlap
-  can each read a stale snapshot of the sibling leaf statuses and each write a derived roll-up
-  computed from an incomplete picture (a write-skew). Leaf rows are always correct, since each leaf
-  is a pure function of its own grade; only the derived group/competency rows can be left wrong.
-  Nothing crashes and no constraint is violated, but a learner's stored competency status can be
-  silently incorrect.
+Two forces shape how recording should happen:
+
+- **Same-learner correctness.** A grade change writes the changed leaf and then re-derives the
+  group and competency rows above it. Leaf rows are always correct, since each leaf is a pure
+  function of its own grade. The derived rows are the hazard: two evaluations for the same learner
+  that overlap can each read a stale snapshot of the sibling leaf statuses and each write a derived
+  roll-up computed from an incomplete picture (a *write-skew*). Nothing crashes and no constraint is
+  violated, but a learner's stored competency status can be silently wrong.
 
 - **Throughput.** Grading is bursty and spans a very large number of learners, so the recording
-  path must keep up without paying a serialization or per-event transaction cost that grows with
-  the number of learners being graded.
+  path must keep up under peak load.
 
-The question is how to guarantee same-learner correctness while still recording at high aggregate
-throughput, over best-effort in-process delivery and without making the event bus mandatory.
+The question is how to guarantee same-learner correctness at high throughput, over best-effort
+in-process delivery, without making the event bus mandatory.
 
 Decision
 --------
-Grade changes are delivered to openedx-core as batched ``openedx-events`` events produced by a
-scheduled task on the edx-platform side, buffered into an openedx-core inbox, then recorded in
-windowed micro-batches serialized by a single deployment-wide lock. Correctness is chosen over
-horizontal write throughput: a single serialized pipeline is adequate while it keeps up with peak
-grading, it keeps the recorder self-contained and behaving identically on any Open edX deployment,
-and it adds no new mandatory infrastructure. This decision depends on the `Prerequisite`_ below and
-stays Proposed until that work lands.
+Recording is made **coordination-free** by leaning on the monotonicity above: no lock, no
+serialized pipeline, no partitioning-for-correctness. Two mechanisms provide correctness, and they
+are what any entry point below must implement.
 
-**Producing grade changes (edx-platform side).** A scheduled task in edx-platform reads the
-subsections whose grade changed since a stored ``modified``-timestamp watermark (an indexed range
-query on the persisted subsection-grade table, joined with its separately stored overrides to get
-the effective grade), selects only the fields the recorder needs, and emits them as an
-``openedx-events`` event. Because an ``openedx-events`` payload is conventionally a single entity
-and, when the event bus is enabled, is size-capped by the transport, a cycle's rows are split into
-bounded, fixed-size batch events rather than one large payload; carrying a list of rows is a
-deliberate exception to the single-entity convention, scoped to this producer. Each row carries an
-effective source timestamp, computed as the later of the base grade's and the override's
-``modified`` time, so an override-only correction, which does not touch the base row, still
-registers as newer.
+**1. Every write is a monotone merge, never a blind overwrite.** A node's status is written as
+``status := max(stored status, newly computed status)`` (a single ``GREATEST``-style ``UPDATE``,
+atomic at the row for the duration of that one statement, with no application-level lock). Because
+the merge takes the higher of the two values, it is commutative, idempotent, and insensitive to
+order: applying the same set of advances in any order, and re-applying any of them, yields the same
+result. A late or duplicate delivery carries a status no higher than what is stored, so it is a
+no-op. This is why out-of-order delivery and re-delivery are harmless without sequence tracking.
 
-**Buffering and batching (openedx-core side).** Because delivery is in-process and synchronous, the
-receiver does the minimum: it writes the batch's rows into an openedx-core-owned inbox table,
-idempotently keyed so a re-delivered row is a no-op, and returns. A separate openedx-core scheduled
-task drains the inbox in windowed micro-batches. Keeping the evaluation and the lock out of the
-receiver keeps them off edx-platform's scheduler, bounds what a slow or wedged recorder can do to
-the producer to "one more row in a table," and makes the durable inbox write, not the evaluation,
-the step that must succeed for an event not to be lost.
+**2. When a child advances, its parent is re-evaluated from the committed children.** The merge in
+mechanism 1 makes a single write safe, but a *conjunctive* parent (for example "demonstrated only
+when all children are demonstrated") can still be computed from a stale view of its siblings. Two
+overlapping evaluations for one learner can each see only their own child's advance and each
+compute a parent value that is too low, never too high. To close that gap, every child advance
+re-evaluates the parent reading the *committed* child rows, and propagates upward if the parent
+advances. Commits are serialized by the database, so there is always a last committer, and the
+re-evaluation it triggers reads every sibling's committed value and merges the parent up to the
+correct result. Derived rows are therefore *eventually correct and never over-stated*, with no
+coordination between workers. In the language of the CALM theorem, a monotone computation needs no
+coordination.
 
-**Recording pipeline.** Resolving which competencies a subsection feeds is learner-independent, so
-it is cached and de-duplicated across the batch. Each batch does one bulk read of current ACTIVE
-statuses, evaluates in memory, and then, in a small fixed number of round-trips, bulk-upserts the
-changed ACTIVE rows and bulk-appends the HISTORY rows, at the leaf level and every rolled-up level
-it touches. The number of round-trips per batch is fixed regardless of how many leaves the batch
-covers, which is what keeps the higher per-batch row count of stored leaves (see the stored-leaf
-performance note below) from turning into per-row overhead. The in-memory engine
-(:ref:`openedx-learning-adr-0002`) is unchanged: to apply several of one learner's events, the
-recorder folds them in effective-source-timestamp order against an evolving snapshot. Persistence
-follows :ref:`openedx-learning-adr-0005`'s ACTIVE-plus-HISTORY split. Two rules govern whether a
-status is advanced and a HISTORY row written:
+The only way mechanism 2 can leave a parent low is if the last re-evaluation is never run (a lost
+trigger). An optional monotone re-derivation sweep is a sound backstop: because it can only advance
+a status, it repairs a stalled parent without ever corrupting one. It is not the "reconciliation to
+fix wrong values" that a non-monotone design would need; it is belt-and-suspenders for a dropped
+trigger, and can be omitted until lost triggers are actually observed.
 
-    - *Out-of-order defense.* A change is ignored when its effective source timestamp is older than
-      the current leaf's, so a late arrival cannot regress a newer status. This is a
-      delivery-ordering guarantee, distinct from the next rule.
-    - *Advance-only; no automatic regression.* Once a status reaches the demonstrated level it is
-      retained ("banked"), at every level including the leaf (:ref:`openedx-learning-adr-0005`). The
-      recorder records first attainment and advancements automatically but does not regress a banked
-      status below the demonstrated level, even for a legitimately newer downward grade correction. A
-      downward correction does not advance the status, so it writes no HISTORY row; HISTORY records
-      only advances, which is what bounds it by monotonicity (:ref:`openedx-learning-adr-0005`).
-      Reversing a banked status is a separate administrative action, out of scope here.
+Two rules govern whether a status advances and a HISTORY row is written; both fall out of
+monotonicity:
 
-**Correctness by a single serializing batch lock.** One deployment-wide lock guards the whole
-drain-batch operation, so only one batch runs at a time across the deployment. The read,
-evaluation, and append for a batch all happen under that lock, so no two workers ever evaluate the
-same learner concurrently and the same-learner write-skew described in the Context cannot occur.
-The lock is realized on infrastructure every deployment already has (for example, a database-backed
-advisory lock) rather than on the event transport, so the recorder behaves the same on any
-event-bus backend and adds no new operational dependency.
+    - *Out-of-order defense.* A change older than the current leaf's effective source timestamp is
+      ignored, so a late arrival cannot regress a newer status. The monotone merge already enforces
+      this for the stored status; the timestamp check avoids writing a spurious HISTORY row for a
+      stale advance.
+    - *Advance-only; no automatic regression.* Once a status reaches a level it is banked at every
+      level including the leaf (:ref:`openedx-learning-adr-0005`). A downward grade correction does
+      not advance the status and writes no HISTORY row, which is what bounds HISTORY by
+      monotonicity. Reversing a banked status is a separate administrative action, out of scope
+      here.
 
-**Durability.** In-process delivery swallows receiver exceptions and the producer's watermark
-advances regardless, so a dropped event could otherwise be lost silently. Two low-cost mechanisms
-cover this: the producer re-scans a trailing overlap window behind its watermark each cycle, so a
-row committed just behind the cursor or missed once is re-emitted, and the consumer is idempotent,
-so re-delivery is harmless. An on-demand reconciliation command is provided as an operator escape
-hatch for incidents. A permanent scheduled reconciliation sweep is deliberately not included: it is
-the kind of always-on cost this decision otherwise avoids, and can be added if real drops are ever
-observed.
+**Entry point: two options, presented without a preference.** Both implement the two mechanisms
+above; they differ only in *where the leaf write happens* and whether it is atomic with the grade
+write. The choice is a follow-up decision.
 
-**Latency.** Recording is expected to lag grading by minutes, not to be real-time; the dashboards
-this feeds tolerate that. The producer's interval is a deployment setting with a documented floor.
+    **Option A: record inside the subsection-grade transaction.** edx-platform wraps its subsection
+    grade write and a synchronous call into an openedx-core recording API in one
+    ``transaction.atomic()``. This assumes mastery tables and the subsection-grade table share one
+    database, which makes grade and mastery genuinely atomic.
 
-**Performance of stored leaves.** :ref:`openedx-learning-adr-0005` stores leaf mastery, so a batch
-now writes on the order of the per-course leaf fan-out (up to ~200x) more rows than a
-group-and-competency-only design would. This does not change the shape of the pipeline: the writes
-are bulk (one bulk upsert of ACTIVE rows and one bulk append of HISTORY rows per level), so the
-number of statements and the time held under the lock scale with batch size, not with the number of
-learners or leaves inside a statement. The lock serializes whole batches, not rows, so the extra
-rows add bulk-write time within a batch rather than lock contention between batches. The single
-serialized pipeline remains adequate while one batch keeps up with peak grading; the higher leaf
-write volume lowers the headroom before that ceiling relative to the transient-leaf design, and the
-sustained-growth revisit noted below applies all the more. Batch size is the primary tuning knob,
-and the mass recompute from a structural criteria edit is chunked and rate-limited
-(:ref:`openedx-learning-adr-0005`) so it cannot crowd out live recording.
+        - Pros: grade and mastery can never diverge; recording is real-time; no new event type is
+          needed, only a call from code that already runs.
+        - Cons: mastery work sits on the synchronous grading path, so a slow mastery query or a bug
+          adds latency to, or rolls back, the grade write (grades are the more critical data);
+          requires the shared database; and a conjunctive parent still needs a post-commit
+          re-evaluation (mechanism 2) to be airtight, so Option A is not purely inline unless it
+          accepts "heals on the learner's next event."
+
+    **Option B: record from a subsection-grade-changed signal received in openedx-core.**
+    edx-platform emits a subsection-granular signal or event; an openedx-core receiver does the
+    monotone merge and the upward re-evaluation.
+
+        - Pros: keeps mastery off the grade transaction, so mastery failures or latency never touch
+          grade writes; all mastery logic lives in openedx-core, which is the correct owner; no
+          shared-database requirement.
+        - Cons: not atomic with the grade write, so there is a brief window where the grade is
+          written but mastery is not yet (acceptable because mastery is already eventually
+          consistent and monotone); needs a new subsection-granular event
+          (see `Prerequisite`_); and in-process delivery is best-effort, so it relies on the
+          durability backstop below.
+
+**Throughput and optional batching.** Because writes commute (mechanism 1), throughput no longer
+depends on a single serialized pipeline. Under Option B, more consumer workers can run in parallel;
+under Option A, throughput is bounded by the grade path itself. Horizontal scale, which a lock-based
+design would sacrifice, is available for free. Batching, a scheduled producer worker on the
+edx-platform side that polls changed grades, coalesces them, and emits bounded batch events, is
+therefore *optional*: it is one way to raise throughput, now competing with simply adding parallel
+consumers rather than being the only route to it. Without batching, Option B receives one signal
+per change and Option A needs no producer at all. Batching is *necessary* rather than merely
+nice-to-have when:
+
+    - Sustained per-change volume exceeds what parallel per-change consumers (Option B) or the
+      grade path (Option A) can absorb, so the fixed per-change overhead (competency resolution,
+      round-trips, task scheduling) dominates and only coalescing into bulk operations keeps up.
+    - The stored-leaf write amplification (:ref:`openedx-learning-adr-0005`; up to ~200x the
+      per-course leaf fan-out) makes per-change writes individually expensive, so bulk upserts
+      across a batch are needed to bound the statement count.
+    - Grading bursts (an exam closing, a bulk regrade) produce spikes that would otherwise saturate
+      consumers or the grade path.
+
+Resolving which competencies a subsection feeds is learner-independent, so when batching is used it
+is cached and de-duplicated across the batch, and each batch does one bulk read of current ACTIVE
+statuses, evaluates in memory, and bulk-writes the changed ACTIVE and HISTORY rows per level.
+
+**Latency.** Option A records in real time. Option B without batching lags by receiver processing;
+with batching it lags by the producer interval plus drain time. The dashboards this feeds tolerate
+minutes.
+
+**Durability.** In-process delivery swallows receiver exceptions, so a dropped event could be lost
+silently. Under Option B the producer (batched or per-change) re-scans a trailing overlap window
+behind its watermark each cycle so a missed row is re-emitted, and the monotone merge makes
+re-delivery a no-op. Under Option A the atomic transaction is the durability guarantee. An on-demand
+reconciliation command is provided as an operator escape hatch; a permanent scheduled sweep is not
+required (see the optional monotone backstop above).
 
 Accepted tradeoffs:
 
-    - The write path is a single pipeline: only one batch runs at a time, so recording and evaluating does not
-      scale horizontally. This is adequate only while one batch pipeline keeps up with peak grading;
-      sustained high-volume growth would force a revisit.
-    - It introduces a lock and its lifecycle (acquisition, timeout, stale-lock recovery on crash)
-      that a lock-free partitioning design would avoid.
-    - Recording lags grading by the producer interval plus drain time; mastery is not updated in
-      real time.
-    - It requires new edx-platform code and a new ``openedx-events`` event (see `Prerequisite`_),
-      which is cross-repo coordination, though it keeps the dependency direction correct.
+    - Correctness is *eventual*, not point-in-time: a reader can briefly observe a derived status
+      that is too low, between a child's commit and its parent's re-evaluation. It is never too
+      high, and it converges. Consumers that need an exactly-consistent-at-all-times roll-up are
+      not served by this design.
+    - Mastery is a high-water mark. A downward or revoked grade never lowers it; un-mastering is a
+      deliberate out-of-band action. This is inherited from :ref:`openedx-learning-adr-0005` and is
+      the property that buys the coordination-free write path.
+    - Correctness depends on criteria staying monotone (no negation in
+      :ref:`openedx-learning-adr-0002`'s trees). If a future criteria feature introduces negation,
+      that node's parent is no longer monotone and this design does not cover it.
+    - Both options need edx-platform code, and Option B needs a new ``openedx-events`` event
+      (see `Prerequisite`_), which is cross-repo coordination, though it keeps the dependency
+      direction correct.
 
 Prerequisite
 ------------
-This decision requires, in edx-platform, the scheduled producer task and the ``openedx-events``
-event or events it emits. Their edx-platform-side design (task location, Celery queue,
-retry/backoff, watermark storage, and crash recovery) is out of scope here and belongs in that
-companion work. :ref:`openedx-learning-adr-0001` rejected this migration (its rejected alternative
-8) as out of scope at the time; this decision takes it up as a now-scheduled prerequisite, and any
-project documentation listing the migration as a non-goal is correspondingly superseded.
+This decision requires cross-repo work in edx-platform, differing by option. Option A requires the
+subsection grade write to call an openedx-core recording API within its transaction, and the mastery
+tables to be routed to the same database. Option B requires a scheduled or signal-driven producer
+and the ``openedx-events`` event or events it emits; the batched variant additionally requires the
+polling-and-coalescing producer worker. The edx-platform-side design (task location, Celery queue,
+retry/backoff, watermark storage, crash recovery) is out of scope here and belongs in that companion
+work. :ref:`openedx-learning-adr-0001` rejected this migration (its rejected alternative 8) as out of
+scope at the time; this decision takes it up as a now-scheduled prerequisite, and any project
+documentation listing the migration as a non-goal is correspondingly superseded.
 
 Rejected Alternatives
 ---------------------
 
-1. Correctness by keyed partitioning instead of a lock.
+1. Serialize all writers with a lock (the previous form of this decision).
 
-    Partition grade-change events by ``user_id``: the key is *hashed* onto a small, fixed number of
-    partitions (not one partition per learner), so every event for a learner lands on the same
-    partition and is consumed by exactly one consumer. Same-learner events are then processed serially
-    by construction, with no database lock, while different learners are processed in parallel across
-    partitions.
+    Record under a single deployment-wide lock (or a per-learner lock), so no two workers ever
+    evaluate the same learner at once and the write-skew cannot occur. This was the earlier design
+    for competency mastery recording.
 
     - Pros:
-        - Correctness is structural; no lock and no lock lifecycle.
-        - The write path scales horizontally with the partition count.
+        - Correct regardless of delivery order or topology, without depending on monotonicity.
+        - Self-contained: relies only on the database.
     - Cons:
-        - Relies on the transport routing by key. Kafka does this natively; Redis Streams consumer
-          groups do not, so on Redis it needs application-level sharding into per-shard streams.
-        - Couples openedx-core to a platform-side contract in the wrong direction: the producer, in
-          openedx-platform, must set the partition key and keep the partition count stable, so the
-          core recorder's correctness depends on platform-side behavior.
-        - Changing the partition count reshuffles learners and can briefly let two consumers touch
-          one learner, so it needs an on-demand reconciliation command as a backstop.
-    - Why rejected: it optimizes for horizontal throughput at the cost of the two properties this
-      decision values most. It depends on the event transport (Kafka's keyed routing, or Redis-side
-      sharding that is not an established pattern in vanilla Open edX), so it would not behave
-      uniformly on a stock deployment, whereas the chosen approach is transport-agnostic. And it
-      inverts the intended dependency direction by making openedx-core rely on an openedx-platform
-      partition-key contract plus a reconciliation backstop. The horizontal scale it buys is not
-      needed while a single batch pipeline keeps up with peak grading, and accuracy is the priority
-      over the extra latency the single pipeline adds.
+        - A single deployment-wide lock forces a single serialized pipeline: recording does not
+          scale horizontally, which is only adequate while one pipeline keeps up with peak grading.
+        - A per-learner lock removes that cap but multiplies the lock lifecycle (acquisition,
+          timeout, stale-lock recovery) across potentially millions of learner keys, and fights the
+          cross-learner batching that throughput would otherwise rely on.
+        - Either way it introduces a lock and its failure modes for a guarantee monotonicity already
+          provides.
+    - Why rejected: the write-skew a lock exists to prevent is a consequence of computing derived
+      rows non-monotonically. Once every write is a monotone merge and every child advance
+      re-evaluates its parent, concurrent same-learner evaluations converge on their own, so the
+      lock guards against a hazard that no longer exists. Removing it also restores horizontal
+      scalability that the locked design gave up. The lock is strictly more machinery for strictly
+      less throughput.
 
-2. Shrink the batch lock to guard only the bulk read and bulk write, running the per-learner
-   evaluation in parallel outside the lock.
+2. Allow non-monotonic mastery and repair drift with a reconciliation sweep.
 
-    - Motivation: the database I/O is cheap (a few bulk statements), so locking only the I/O and
-      parallelizing the heavier evaluation looks like it would keep correctness while lifting the
-      chosen approach's single-pipeline cap.
-    - Why rejected: the lock exists to make each learner's read-evaluate-write atomic against other
-      writers, not to protect the I/O. Moving evaluation outside the lock reintroduces the exact
-      write-skew from the Context: two workers read the same snapshot for one learner, both
-      evaluate, and both write a roll-up from an incomplete picture. Making parallel evaluation
-      correct requires that each learner is only ever handled by one worker at a time, which is
-      per-learner isolation, i.e. the keyed-partitioning alternative above. This is therefore not a
-      distinct option: with the isolation added it becomes keyed partitioning; without it, it is
-      incorrect.
-
-3. A per-learner lock (a lock keyed on the learner) instead of the single deployment-wide lock.
-
-    A per-learner lock is the minimal primitive that satisfies the correctness requirement: it
-    guarantees no two workers evaluate the same learner at once, which is exactly what prevents the
-    same-learner write-skew in the Context. It is therefore *not* rejected for being incorrect. It is
-    rejected because it is dominated on both sides: for correctness alone the single deployment-wide
-    lock is simpler, and for the one thing a per-learner lock adds over that (letting different
-    learners record in parallel) keyed partitioning (alternative 1) is strictly better. The
-    per-learner lock is the awkward middle between the two.
+    Let a status move up or down freely with the latest grade, accept that concurrency can leave
+    derived rows wrong, and run a scheduled job that recomputes each learner from scratch to correct
+    them.
 
     - Pros:
-        - Correct regardless of delivery order or deployment topology, without depending on how
-          events are routed or partitioned.
-        - Self-contained: it relies only on the database, with no event-bus partitioning contract.
-        - Unlike the single deployment-wide lock, it lets different learners be recorded in parallel.
+        - Mastery tracks the current grade exactly, including downward corrections, with no
+          high-water-mark surprise.
     - Cons:
-        - *It fights the batching the throughput depends on.* The chosen pipeline is fast because it
-          batches across learners: one bulk read, one in-memory evaluation, one bulk write per batch,
-          amortized over every learner in the batch. A per-learner lock is taken per learner, so work
-          is serialized and committed per learner (in the original per-event form, per event), which
-          reintroduces exactly the per-unit transaction, commit, and lock acquire/release overhead
-          that batching removes. Under bursty grading across many learners that per-unit overhead
-          dominates.
-        - *Its lock lifecycle is multiplied across every learner.* The single lock has one lifecycle
-          to operate (acquisition, timeout, stale-lock recovery on a crashed worker). A per-learner
-          lock needs a per-learner lock table (or keyed advisory locks) and that same lifecycle
-          replicated across potentially millions of learner keys, held and waited on concurrently,
-          with a database connection and worker tied up per contended lock.
-        - *The batched variant becomes a multi-lock ordering problem.* Trying to keep the batching by
-          locking every learner in a batch at once means holding many locks simultaneously and
-          acquiring them in a consistent order to avoid deadlock between batches whose learner sets
-          overlap: more failure modes than a single lock, for no correctness gain.
-        - Storing leaves (:ref:`openedx-learning-adr-0005`) widens this gap rather than narrowing it:
-          the per-learner write volume is now roughly the per-course leaf fan-out larger, so
-          processing per learner without amortizing across learners costs more than it did before.
-    - Why rejected: the per-learner lock buys exactly one thing over the single deployment-wide lock,
-      per-learner parallelism, and pays for it with per-learner lock machinery and the loss of
-      cross-learner batching. While parallelism is not the binding constraint (the current
-      expectation, since one batch pipeline keeps up with peak grading) the single lock is simpler and
-      correct. When parallelism does become the binding constraint, keyed partitioning (alternative 1)
-      provides the same per-learner serialization as a structural property, lock-free and horizontally
-      scalable, which strictly beats a per-learner lock. There is no operating point at which the
-      per-learner lock is the best option, which is why it is not the chosen design and not the
-      escalation path. This was an earlier design for competency mastery recording; both the chosen
-      batch lock and keyed partitioning supersede it. See also alternative 2, which shows that keeping
-      the batching while moving evaluation outside a single lock collapses into either this
-      per-learner isolation or the write-skew.
+        - Gives up the coordination-free property: a non-monotone merge is not order-insensitive, so
+          concurrent writers can corrupt (not merely understate) a derived row.
+        - Requires an always-on correcting reconciliation process to converge, the kind of standing
+          cost this decision avoids.
+    - Why rejected: monotonicity is the linchpin that makes the lock-free write path correct.
+      Trading it away to track downward corrections reintroduces exactly the coordination problem
+      this decision removes, and the product treats mastery as banked anyway
+      (:ref:`openedx-learning-adr-0005`).
 
-4. No lock; assume same-learner conflicts are rare and tolerate them.
-    - Pros:
-        - The least machinery of any option: no lock, no partitioning-for-correctness, relying on
-          eventual self-healing on the next event and a reconciliation job.
-    - Cons:
-        - Correctness becomes best-effort. A concurrent same-learner conflict can leave a transient
-          wrong derived status.
-        - A wrong status lingers indefinitely if the learner receives no further relevant event.
-        - Unacceptable on the learner- and instructor-facing dashboards this feeds, where an
-          incorrect status is directly visible, and on any future credentialing that consumes it.
+3. Overwrite derived rows with the freshly computed value instead of a monotone merge.
 
-5. Recompute derived levels on read instead of materializing them.
+    - Why rejected: a blind ``status := computed`` write is a lost update under concurrency, since a
+      worker computing from a stale sibling snapshot can overwrite a higher value another worker
+      just wrote. The monotone ``max`` merge is precisely what makes concurrent writes safe; without
+      it, mechanism 1 does not hold and a lock would be back in scope.
+
+4. Recompute derived levels on read instead of materializing them.
+
     - Pros:
         - Removes the write-skew hazard entirely: if nothing derived is stored, nothing derived can
           drift, and the write path is trivial.
     - Cons:
         - Reopens :ref:`openedx-learning-adr-0002`, which deliberately materializes derived levels
-          for dashboard read performance.
-        - Moves the cost onto every read, which is the surface that decision was protecting.
-        - Out of scope for this decision.
+          for dashboard read performance, and moves the cost onto every read.
+    - Why rejected: out of scope for this decision; the read-performance tradeoff was settled in
+      :ref:`openedx-learning-adr-0002`.
 
-6. Real-time per-subsection events with batching on the openedx-core side.
+5. Let openedx-core obtain grades directly instead of having edx-platform push them.
 
-    edx-platform emits one ``openedx-events`` event per subsection grade change as it happens, and
-    openedx-core absorbs the per-event stream, buffering and batching on its own side instead of
-    having the producer batch first.
+    Variants: openedx-core polls the persisted subsection-grade and override tables on their indexed
+    ``modified`` columns; or the subsection-grade model is relocated into openedx-core so edx-platform
+    imports it; or a swappable base model (in the style of ``AUTH_USER_MODEL``) is defined in
+    openedx-core and supplied by edx-platform.
 
-    - Pros:
-        - Lower latency: mastery can update within seconds of a grade change rather than within a
-          polling interval.
-        - No new scheduled producer task; it reuses the point where the grade is already written.
-    - Cons:
-        - The event rate is set by grading volume and scales with however widely competencies are
-          adopted, which is unknown, so the consumer must be sized for a firehose it cannot bound.
-        - Each event is an inter-process signal and, on the openedx-core side, a durable write on or
-          near the hot grading path.
-    - Why rejected: producer-side batching bounds the event rate at the source regardless of
-      adoption, so the recorder is scalable by default on a very large deployment without having to
-      predict how widely competencies will be enabled or whether per-event volume becomes a
-      problem. Trading a few minutes of latency for that bound is the priority here.
+    - Why rejected: all three break the layering rule that openedx-core must not depend on
+      edx-platform. Polling couples the recorder to a private grade schema that changes by migration
+      without notice and re-implements the override layering it would drift from. Relocating a
+      mature, deeply woven platform model is a large, risky migration out of proportion to this
+      feature. The swappable-model pattern is effectively a one-off for the user model, cannot be
+      retrofitted onto an existing table, and would be first-of-its-kind machinery here. A push from
+      edx-platform (Option A's call or Option B's versioned event) gets the data across the boundary
+      in the correct direction without any of this.
 
-7. openedx-core polls the persisted grade tables directly.
+6. Deliver over a mandatory event bus.
 
-    Instead of consuming events, openedx-core runs its own periodic query against the persisted
-    subsection-grade and override tables, using their indexed ``modified`` columns to find changes.
-
-    - Pros:
-        - Cheapest possible read: the ``modified`` indexes exist for exactly this timespan query, so
-          it is one indexed range scan per cycle with no per-event cost.
-        - No dependency on any event being emitted.
-    - Cons:
-        - It makes openedx-core depend on edx-platform's private grade schema, an implementation
-          detail with no stability guarantee, rather than on a versioned contract.
-        - The effective grade must be recomputed by re-implementing edx-platform's separate override
-          layering, which will drift as the platform changes it.
-    - Why rejected: it breaks the layering rule (openedx-core must not depend on edx-platform) and
-      this decision's value of behaving identically on any deployment. A table schema is an
-      implementation detail that changes by migration without notice; a versioned event is a
-      contract. The cost saving is real but does not justify coupling the recorder to platform
-      internals.
-
-8. Move the persisted subsection-grade model into openedx-core so edx-platform imports it.
-
-    Follow this repo's established pattern (a library-owned model that edx-platform depends on) by
-    relocating the subsection-grade model into openedx-core.
-
-    - Pros:
-        - openedx-core could read the data in-process with no cross-boundary contract at all.
-        - It is the same ownership pattern openedx-core already uses for content models.
-    - Cons:
-        - The subsection-grade model is a large, deeply woven edx-platform model with extensive
-          signal wiring, override semantics, and migration history.
-        - Relocating it inverts ownership of a central platform concern and is a major migration.
-    - Why rejected: that pattern fits models built new in openedx-core, not a mature, central
-      edx-platform model. The extraction would be a large, risky effort out of all proportion to
-      recording competency mastery. It may be the right long-term shape if Open edX decides grades
-      belong in the learning core, but that is a separate, much larger decision.
-
-9. A shared-contract or swappable grade model.
-
-    openedx-core defines a minimal base model as a contract; edx-platform supplies the concrete
-    table (with any extra columns it needs) and openedx-core resolves it through a setting, in the
-    style of Django's swappable ``AUTH_USER_MODEL``.
-
-    - Pros:
-        - openedx-core reads the data without importing edx-platform, and the platform keeps freedom
-          to extend its own table.
-    - Cons:
-        - Django's swappable-model machinery is, in practice, a one-off for the user model; the
-          third-party generalizations are niche and carry hard constraints (a swappable model must
-          exist from the app's first migration, and retrofitting an existing table is unsupported).
-        - It still couples the platform to an openedx-core-dictated schema, and there is no
-          precedent for it in this ecosystem beyond the user-model foreign key.
-    - Why rejected: it would be first-of-its-kind machinery for the project, applied to a table that
-      already exists and so hits exactly the retrofit constraints the pattern handles worst, for a
-      benefit a versioned event contract already provides more cleanly.
-
-10. Enable and rely on the ``openedx-events`` event bus as the delivery mechanism.
-
-    Route grade events over the Kafka or Redis event bus and have openedx-core consume them as a bus
+    Route grade events over the Kafka or Redis event bus and consume them in openedx-core as a bus
     consumer.
 
     - Pros:
-        - The bus is a durable buffer with native batch polling and at-least-once delivery, which
-          would close the durability gap without an inbox or a reconciliation command.
-        - A bus consumer runs in its own process, off edx-platform's workers.
+        - The bus is a durable buffer with native batch polling and at-least-once delivery, closing
+          the durability gap without an inbox or reconciliation command.
     - Cons:
-        - The event bus is not enabled in a stock edx-platform deployment.
-        - Requiring it makes Kafka or Redis mandatory infrastructure for any deployment that wants
-          competencies.
-    - Why rejected: mandating event-bus infrastructure is a far larger operational decision than
-      this feature should force on operators. The chosen design runs over ordinary in-process
-      signals and is transport-agnostic: it can take advantage of the bus where a deployment already
-      runs one, but it does not require it.
+        - The event bus is not enabled in a stock edx-platform deployment, so requiring it makes
+          Kafka or Redis mandatory infrastructure for any deployment that wants competencies.
+    - Why rejected: mandating event-bus infrastructure is a far larger operational imposition than
+      this feature should force on operators. Both options run over ordinary in-process delivery and
+      can take advantage of the bus where a deployment already runs one, without requiring it.
+
+7. Correctness by keyed partitioning.
+
+    Partition grade-change events by ``user_id`` so every event for a learner is consumed by exactly
+    one worker, making same-learner events serial by construction with no lock.
+
+    - Why rejected: this was the lock-free alternative worth considering only while correctness
+      required serialization. Under monotone merge, correctness no longer requires that any two
+      same-learner events be serialized at all, so partitioning solves a problem this decision no
+      longer has. It would also couple the recorder to a transport-level routing contract (native on
+      Kafka, application-level sharding on Redis) that monotonicity makes unnecessary.
