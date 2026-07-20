@@ -4,28 +4,29 @@ Companion diagrams for `0004-competency-mastery-concurrency.rst`. They are kept 
 they render natively on GitHub; they are not part of the Sphinx/readthedocs build. Refer to the ADR
 for the authoritative decision text.
 
-## 1. Entry points: two options (no preference)
+## 1. Entry point and durable hand-off
 
-Both options push a grade change from edx-platform into openedx-core, which records it with a
-monotone merge and re-evaluates the parents. They differ only in where the leaf write happens and
-whether it is atomic with the grade write. Batching (the dashed producer) is optional and applies to
-Option B.
+edx-platform emits a subsection-grade-changed event; an openedx-core receiver only enqueues an
+idempotent, retriable task, and that task does the monotone merge and re-evaluates the parents. The
+thin receiver plus retriable task is edx-platform's own grade-recompute pattern, and it is what makes
+a dropped in-process signal survivable. Batching (the dashed producer) is optional (decision 6).
 
 ```mermaid
 flowchart TD
     subgraph EP["edx-platform (higher layer)"]
         GRADE["Subsection grade write"]
+        SIG["Emit subsection-grade-changed event"]
         PROD["Optional producer worker:<br/>poll changed grades, coalesce,<br/>emit bounded batch events"]
     end
     subgraph CORE["openedx-core (lower layer)"]
-        API["Recording API:<br/>monotone merge + re-evaluate parents"]
-        RCV["Signal/event receiver"]
+        RCV["Receiver: enqueue task only"]
+        TASK["Task (retriable, idempotent):<br/>monotone merge + re-evaluate parents<br/>in one transaction"]
     end
 
-    GRADE -->|"Option A: synchronous call<br/>inside the same transaction<br/>(shared DB, atomic)"| API
-    GRADE -->|"Option B: emit subsection-grade-changed<br/>signal/event"| RCV
+    GRADE --> SIG
+    SIG -->|"in-process event"| RCV
     PROD -.->|"optional batched events"| RCV
-    RCV --> API
+    RCV -->|"apply_async"| TASK
 ```
 
 ## 2. Why it is correct: one transaction, monotone merge, brief per-node row lock
@@ -54,17 +55,21 @@ sequenceDiagram
     Note over DB: locks taken child-before-parent up to root → no deadlock
 ```
 
-## 3. Recovering a lost delivery (Option B): trailing-overlap re-scan
+## 3. Recovering a lost delivery: retriable task, not a re-scan
 
-Option A cannot lose a change (mastery shares the grade transaction). Option B carries it over an
-in-process signal that can be dropped silently. The producer re-reads a short overlap window behind
-its watermark each cycle, so a dropped change is re-emitted next cycle; the monotone merge makes the
-re-delivery a no-op if it was already recorded. No reconciliation command and no correcting sweep.
+The in-process event can be dropped silently (``send_robust`` catches and logs a receiver
+exception). Durability follows edx-platform's grades pattern: the receiver only enqueues, and the
+task queue's at-least-once delivery plus task retries plus the monotone merge's idempotency carry the
+work through. No scheduled reconciliation sweep; a genuine loss (enqueue failed during a broker
+outage) is recovered by an operator-run bulk recompute, exactly as edx-platform recovers a missed
+grade recompute.
 
 ```mermaid
 flowchart LR
-    WM["Watermark T"] --> SCAN["Query grades changed since (T - overlap)"]
-    SCAN --> EMIT["Emit signal/event per change"]
-    EMIT --> MERGE["Recorder: monotone merge<br/>(re-delivery of a recorded change is a no-op)"]
-    SCAN --> ADV["Advance watermark → next scan stays a short-window seek"]
+    RCV["Receiver (send_robust:<br/>exception logged, not fatal)"] -->|"apply_async"| Q["Task queue<br/>(at-least-once, persisted)"]
+    Q --> TASK["Task: monotone merge + roll-up"]
+    TASK -->|"transient error"| RETRY["self.retry"]
+    RETRY --> Q
+    TASK -->|"stale / duplicate"| NOOP["no-op via max-merge +<br/>effective-source-timestamp check"]
+    BROKER["Rare: enqueue lost in broker outage"] -.->|"operator escape hatch"| CMD["Manual bulk recompute<br/>(monotone; only advances)"]
 ```
