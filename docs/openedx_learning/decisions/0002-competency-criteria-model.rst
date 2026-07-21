@@ -167,22 +167,32 @@ Decision
 6. Learner progress status concepts (``StudentCompetency*Status`` database tables)
 
    When a completion event (a subsection grade change, delivered as described in
-   :ref:`openedx-learning-adr-0004`) is evaluated for an object, determine and track the learner's
-   status in earning the competency. Results are stored at each level (leaf, group, competency) so
-   reads do not recompute. Each level is stored as two tables: an ACTIVE table holding one current
-   row per learner and node, updated in place, and an append-only HISTORY table that records one row
-   per genuine status advance. Current status is a direct lookup on the ACTIVE row; the HISTORY table
-   is the audit and point-in-time record. Because mastery is monotonic
-   (:ref:`openedx-learning-adr-0005`), the number of advances per node is bounded by the status
-   lattice, so the HISTORY tables grow with learners and nodes, not with time.
+   :ref:`openedx-learning-adr-0004`) is evaluated for an object, the learner's status in earning the
+   competency is determined and tracked. The design:
+
+   - Stores results at each level (leaf, group, competency) so reads never recompute.
+   - Splits each level into two tables:
+
+     - ACTIVE: one current row per learner and node, updated in place. Current status is a direct
+       lookup on this row.
+     - HISTORY: append-only, one row per genuine status advance. This is the audit and point-in-time
+       record.
+
+   - Bounds HISTORY growth: because mastery is monotonic (:ref:`openedx-learning-adr-0005`), advances
+     per node are capped by the status lattice, so HISTORY grows with learners and nodes, not with
+     time.
 
    These are the large per-learner tables in this model, so they follow the scale posture of
-   :ref:`openedx-learning-adr-0005` (mirroring edx-platform's persistent grades): a 64-bit
-   ``BigAutoField`` primary key, narrow rows, per-read-path composite indexes (Decision 5), and a
-   dedicated database alias reached through a router that defaults to the main database. Their foreign
-   keys to the criteria-definition tables and to the user are logical references declared without
-   database-level constraints, so the tables can live in a different database from the definitions;
-   referential integrity and the delete protection of Decision 7 are enforced in application code.
+   :ref:`openedx-learning-adr-0005` (mirroring edx-platform's persistent grades):
+
+   - 64-bit ``BigAutoField`` primary key.
+   - Narrow rows.
+   - Per-read-path composite indexes (Decision 5).
+   - A dedicated database alias reached through a router that defaults to the main database.
+   - Logical foreign keys to the criteria-definition tables and to the user, declared without
+     database-level constraints. The tables can therefore live in a different database from the
+     definitions, with referential integrity and the delete protection of Decision 7 enforced in
+     application code.
 
    Relationship to other concepts:
 
@@ -218,22 +228,22 @@ Decision
       - This table is system-owned lookup data and should be treated as immutable configuration, not user-authored rows.
 
    2. Add the leaf-level tables ``StudentCompetencyCriteriaStatus`` (ACTIVE) and
-      ``StudentCompetencyCriteriaStatusHistory`` (HISTORY). Both tables have these columns:
+      ``StudentCompetencyCriteriaStatusHistory`` (HISTORY). Their columns:
 
       1. ``id``: 64-bit ``BigAutoField`` primary key
       2. ``competency_criteria_id``: logical foreign key to ``CompetencyCriterion.id`` (no database-level constraint)
       3. ``user_id``: logical foreign key to the learner's user id (no database-level constraint)
       4. ``status_id``: foreign key to ``CompetencyMasteryStatuses.id``
-      5. ``effective_source_timestamp``: the timestamp of the grade change this status was computed from, used for the out-of-order defense in :ref:`openedx-learning-adr-0004`
-      6. ``created``: on ACTIVE, when the row was first written; on HISTORY, when this advance was appended
+      5. ``effective_source_timestamp``: UTC timestamp of the source grade change this status was computed from, taken from the event rather than auto-generated. This is source-event time, distinct from ``created`` (persistence time); the out-of-order defense in :ref:`openedx-learning-adr-0004` compares this value, not ``created``.
+      6. ``created``: UTC timestamp of when this row was written to the database (``auto_now_add``). On ACTIVE it marks the first advance for this learner and leaf; on HISTORY, when the advance was appended. It diverges from ``effective_source_timestamp`` whenever an event is processed late or arrives out of order.
+      7. ``modified``: UTC timestamp of the most recent in-place update (``auto_now``), present on ACTIVE only. ACTIVE rows are updated in place as a learner's status advances; HISTORY rows are append-only and never change after insert, so HISTORY has no ``modified`` column.
 
-      The ACTIVE table additionally has a ``modified`` timestamp (last in-place update) and is unique
-      on ``(user_id, competency_criteria_id)`` (one current row per learner and leaf). The HISTORY
-      table has no such uniqueness constraint: it holds one row per advance and is not written for a
-      suppressed downward correction.
+      ACTIVE is unique on ``(user_id, competency_criteria_id)``: exactly one current row per learner
+      and leaf, updated in place. HISTORY carries no uniqueness constraint and is append-only: one row
+      per genuine advance, with no row written for a suppressed downward correction.
 
    3. Add the group-level tables ``StudentCompetencyCriteriaGroupStatus`` (ACTIVE) and
-      ``StudentCompetencyCriteriaGroupStatusHistory`` (HISTORY). Both tables have these columns:
+      ``StudentCompetencyCriteriaGroupStatusHistory`` (HISTORY). Their columns:
 
       1. ``id``: 64-bit ``BigAutoField`` primary key
       2. ``competency_criteria_group_id``: logical foreign key to ``CompetencyCriteriaGroup.id`` (no database-level constraint)
@@ -241,12 +251,13 @@ Decision
       4. ``status_id``: foreign key to ``CompetencyMasteryStatuses.id``
       5. ``effective_source_timestamp``: as in the leaf tables
       6. ``created``: as in the leaf tables
+      7. ``modified``: as in the leaf tables (ACTIVE only)
 
-      The ACTIVE table additionally has a ``modified`` timestamp and is unique on
-      ``(user_id, competency_criteria_group_id)``.
+      ACTIVE is unique on ``(user_id, competency_criteria_group_id)``: one current row per learner and
+      group, updated in place. HISTORY is append-only with no uniqueness constraint.
 
    4. Add the competency-level tables ``StudentCompetencyStatus`` (ACTIVE) and
-      ``StudentCompetencyStatusHistory`` (HISTORY). Both tables have these columns:
+      ``StudentCompetencyStatusHistory`` (HISTORY). Their columns:
 
       1. ``id``: 64-bit ``BigAutoField`` primary key
       2. ``oel_tagging_tag_id``: logical foreign key to the competency ``Tag`` id (no database-level constraint)
@@ -254,9 +265,10 @@ Decision
       4. ``status_id``: foreign key to ``CompetencyMasteryStatuses.id``. Constrained to “Demonstrated” and “PartiallyAttempted” only, since this represents overall competency demonstration state, not in-progress states.
       5. ``effective_source_timestamp``: as in the leaf tables
       6. ``created``: as in the leaf tables
+      7. ``modified``: as in the leaf tables (ACTIVE only)
 
-      The ACTIVE table additionally has a ``modified`` timestamp and is unique on
-      ``(user_id, oel_tagging_tag_id)``.
+      ACTIVE is unique on ``(user_id, oel_tagging_tag_id)``: one current row per learner and
+      competency, updated in place. HISTORY is append-only with no uniqueness constraint.
 
 7. Delete protection boundaries
 
@@ -272,10 +284,13 @@ Decision
 
 .. note::
 
-   The PNG above is the original overview. It predates the ACTIVE/HISTORY split introduced here and
-   in :ref:`openedx-learning-adr-0005`, and it shows a ``mastery_level_id`` column on
-   ``StudentCompetencyCriteriaStatus`` that is not part of this decision (mastery level is a future
-   rule type). The current data model, including the ACTIVE and HISTORY tables, is diagrammed in
+   The PNG above is the original overview and is now partly out of date:
+
+   - It predates the ACTIVE/HISTORY split introduced here and in :ref:`openedx-learning-adr-0005`.
+   - It shows a ``mastery_level_id`` column on ``StudentCompetencyCriteriaStatus`` that is not part
+     of this decision (mastery level is a future rule type).
+
+   The current data model, including the ACTIVE and HISTORY tables, is diagrammed in
    ``0002-competency-criteria-model-diagram.md``, which is authoritative where it differs from the
    PNG.
 
