@@ -284,15 +284,22 @@ Decision
 
 .. note::
 
-   The PNG above is the original overview and is now partly out of date:
+   The PNG above is the original overview and is now out of date. It is not regenerated here; apply
+   the following modifications when reading it. This decision is the source of truth wherever the two
+   differ.
 
-   - It predates the ACTIVE/HISTORY split introduced here and in :ref:`openedx-learning-adr-0005`.
-   - It shows a ``mastery_level_id`` column on ``StudentCompetencyCriteriaStatus`` that is not part
-     of this decision (mastery level is a future rule type).
-
-   The current data model, including the ACTIVE and HISTORY tables, is diagrammed in
-   ``0002-competency-criteria-model-diagram.md``, which is authoritative where it differs from the
-   PNG.
+   1. Split each learner-status level into two tables: an ACTIVE table (one current row per learner
+      and node, updated in place) and an append-only HISTORY table (one row per genuine status
+      advance). The PNG draws a single table per level, so add
+      ``StudentCompetencyCriteriaStatusHistory``, ``StudentCompetencyCriteriaGroupStatusHistory``,
+      and ``StudentCompetencyStatusHistory``.
+   2. Remove the ``mastery_level_id`` column from ``StudentCompetencyCriteriaStatus``; mastery level
+      is a future rule type and is not part of this decision.
+   3. Add an ``effective_source_timestamp`` column to all six status tables (ACTIVE and HISTORY).
+   4. Add a ``modified`` column to the three ACTIVE tables only; the HISTORY tables keep ``created``
+      alone, since they are append-only and never updated after insert.
+   5. Make each status table's ``id`` a 64-bit ``BigAutoField``, and treat its ``user_id`` and node
+      references as logical foreign keys with no database-level constraint.
 
 
 Example

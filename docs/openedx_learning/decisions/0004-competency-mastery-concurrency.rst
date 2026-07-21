@@ -7,9 +7,6 @@ Status
 ------
 Proposed.
 
-A companion set of diagrams for this decision lives alongside it in
-``0004-competency-mastery-concurrency-diagrams.md``.
-
 Context
 -------
 When a learner is graded on a subsection, the platform must evaluate whether that grade

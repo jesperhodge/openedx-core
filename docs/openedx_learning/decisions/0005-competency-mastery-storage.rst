@@ -26,9 +26,6 @@ This decision refines two prior ADRs and reverses an earlier draft of this one:
 - It reverses an earlier draft of this ADR that computed leaves transiently and never stored them.
   That design is retained as the first rejected alternative below.
 
-A companion set of diagrams for this decision lives alongside it in
-``0005-competency-mastery-storage-diagrams.md``.
-
 Context
 -------
 Per :ref:`openedx-learning-adr-0002`, competency achievement criteria form a boolean tree. An
