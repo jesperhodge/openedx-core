@@ -37,8 +37,17 @@ Two forces shape how recording should happen:
 - **Throughput.** Grading is bursty and spans a very large number of learners, so the recording
   path must keep up under peak load.
 
-The question is how to guarantee same-learner correctness at high throughput, over best-effort
-in-process delivery, without making the event bus mandatory.
+**How the grade reaches the recorder.** edx-platform does not compute a subsection grade on the
+request thread. A score change fires a signal whose receiver enqueues a celery task, and that task
+recomputes and persists the subsection grade. Recording competency mastery therefore has a natural
+home: the recorder is called synchronously from inside that already-async task, in the same database
+transaction as the grade write, so mastery is recorded off the request path yet commits with the
+grade it derives from. openedx-core cannot read edx-platform's grade tables and never imports
+edx-platform; edx-platform is the higher layer and calls a public openedx-core API, passing the
+grade as opaque primitives.
+
+The question is how to guarantee same-learner correctness at high throughput while recording inline
+with the grade write, without adding new mandatory infrastructure.
 
 Decision
 --------
@@ -49,7 +58,6 @@ atomic at the row for the duration of that one statement, with no application-le
 the merge takes the higher of the two values, it is commutative, idempotent, and insensitive to
 order. This is why out-of-order delivery and re-delivery are harmless without sequence tracking.
 
-
 **2. When a child advances, its parent is recomputed in the same transaction, under a brief row lock on that parent.**
 The merge in mechanism 1 makes a single-row write safe, but a *conjunctive*
 parent (for example "demonstrated only when all children are demonstrated") is computed by reading
@@ -59,11 +67,11 @@ row-level lock on the parent row (a ``SELECT ... FOR UPDATE``) before reading it
 updates that touch the same parent for the same learner take turns, and the second reads the first's
 committed children and computes from the complete picture. Locks are taken child-before-parent up
 the path to the root, a consistent order, so concurrent updates cannot deadlock. This is an ordinary
-single-row lock. Every read the recorder makes, here and in the batch path (mechanism 6), runs
-against the primary database and never a read replica: these reads feed the roll-up write and take
-the row locks above, so a replica's lag would compute a roll-up from stale siblings. The
-read-replica offload in :ref:`openedx-learning-adr-0005` is reserved for the read-only dashboard and
-reporting paths.
+single-row lock. Every read the recorder makes, here and in the mass-recompute path
+(:ref:`openedx-learning-adr-0005`), runs against the primary database and never a read replica:
+these reads feed the roll-up write and take the row locks above, so a replica's lag would compute a
+roll-up from stale siblings. The read-replica offload in :ref:`openedx-learning-adr-0005` is
+reserved for the read-only dashboard and reporting paths.
 
 **3. Out-of-order defense.** A change older than the current leaf's effective source timestamp is
 ignored, so a late arrival cannot regress a newer status. The monotone merge already enforces
@@ -76,27 +84,53 @@ not advance the status and writes no HISTORY row, which is what bounds HISTORY b
 monotonicity. Reversing a banked status is a separate administrative action, out of scope
 here.
 
-**5. Entry point: record from a subsection-grade-changed signal received in openedx-core.**
-edx-platform emits a subsection-granular openedx-event signal; an openedx-core receiver enqueues a
-task that does the monotone merge and the upward re-evaluation (see decision 8 for why the receiver
-only enqueues).
+**5. Entry point: a synchronous call from the transaction that produces the grade.** edx-platform
+computes subsection grades in an async celery task triggered by a score-change signal, not on the
+request thread. After that task writes the subsection grade, it calls a public openedx-core API
+within the same transaction; the API does the monotone merge and the upward roll-up. No
+openedx-event is emitted or consumed on the mastery path, and openedx-core enqueues no task of its
+own. Because edx-platform is the higher layer it may call openedx-core (never the reverse), and the
+grade crosses the boundary as opaque primitives (user id, subsection key, score, source timestamp),
+so no edx-platform type enters openedx-core.
 
-**6. Optional batching.** With this ADR, consumer workers can run in parallel,
-scaling horizontally. If further performance increase is needed, batching can be introduced:
-In that case, a scheduled producer worker on the
-edx-platform side polls changed grades, coalesces them, and emits bounded batch events.
-Resolving which competencies a subsection feeds is learner-independent, so when batching is used it
-is cached and de-duplicated across the batch, and each batch does one bulk read of current ACTIVE
-statuses, evaluates in memory, and bulk-writes the changed ACTIVE and HISTORY rows per level.
+**6. Recording is a general pattern: record inside whichever transaction produces the source signal.**
+Subsection grade is the only trigger in scope today and the first instance of this pattern. Mastery is
+also intended to derive from other sources (course completion, unit grade, problem grade, and rubric
+criterion grade); each, when it is built, records by calling the same openedx-core API from inside
+the transaction that writes its own source data. Recording is therefore not coupled specifically to
+the subsection grade (contrast rejected alternative 9): it is the first
+application of a uniform "record in the producer's transaction" contract that every future trigger
+satisfies in turn.
 
-**7. One atomic transaction per grade change.** The recording task does the leaf merge and the
-upward roll-up (mechanism 2) in one database transaction, so the leaf and every affected ancestor
-for a change commit together or not at all. This transaction is the task's own; it is not shared
-with edx-platform's grade write (contrast rejected alternative 8), so mastery trails the grade by
-the enqueue-and-run delay rather than committing atomically with it.
+**7. ACTIVE writes and roll-ups commit atomically with the grade, or the whole task rolls back and retries.**
+The leaf ACTIVE merge and the upward group and competency roll-up (mechanism 2) run inside the grade
+task's transaction, so the leaf and every affected ancestor commit together with the grade or not at
+all. A failure in the mastery work is not swallowed: it rolls back the entire transaction, grade
+included, and the grade task retries (mechanism 9). Because the grade recompute is idempotent and the
+merge is monotone (mechanism 1), the retry redoes both together and reaches the same result, so grade
+and mastery never diverge. The accepted cost is that a persistent mastery fault (a bug, not a
+transient error) blocks the grade write until it is fixed, even though grades are the more critical
+data; a transient fault is absorbed by the retry.
 
-**8. Enqueuing a celery task.** The receiver enqueues an async celery task
-to do the work to ensure durability.
+**8. The leaf HISTORY append runs outside the transaction, best effort.** The leaf HISTORY table
+(``StudentCompetencyCriteriaStatusHistory``) is the one learner-status table that may be routed to a
+separate physical database (:ref:`openedx-learning-adr-0005`), and a single transaction cannot span
+two databases. Its append therefore runs after that transaction commits, as a best-effort,
+non-blocking write whose failure is logged and never rolls back the grade or the ACTIVE mastery, so a
+rolled-back-and-retried attempt (mechanism 7) leaves no orphaned audit row.
+The cost is a possibly-missing audit row, not a wrong current status: the leaf ACTIVE row (the
+dashboard's source of truth) and the small group and competency HISTORY rows stay inside the
+transaction on the grade-write database.
+
+**9. Durability rides edx-platform's grade task.** No separate enqueue or retry queue is added for
+mastery. The grade task already retries on failure and its grade recompute is idempotent, so a retry
+redoes the grade and, with it, the in-transaction mastery merge (itself idempotent under mechanism
+1). A dedicated mastery task, and the durability it was there to provide, is therefore not needed.
+
+**10. No batch path on the per-grade route.** Recording is one synchronous call per grade
+transaction; there is no batch producer and no batch event. The only bulk path is the structural-edit
+mass recompute in :ref:`openedx-learning-adr-0005`, which is not tied to any single grade transaction
+and batches its reads and writes there.
 
 
 Rejected Alternatives
@@ -179,8 +213,8 @@ Rejected Alternatives
       mature, deeply woven platform model is a large, risky migration out of proportion to this
       feature. The swappable-model pattern is effectively a one-off for the user model, cannot be
       retrofitted onto an existing table, and would be first-of-its-kind machinery here. A push from
-      edx-platform (the versioned event this decision uses, or the synchronous call of rejected
-      alternative 8) gets the data across the boundary in the correct direction without any of this.
+      edx-platform (the synchronous in-transaction call this decision uses) gets the data across the
+      boundary in the correct direction without any of this.
 
 6. Deliver over a mandatory event bus.
 
@@ -189,14 +223,14 @@ Rejected Alternatives
 
     - Pros:
         - The bus is a durable buffer with native batch polling and at-least-once delivery, as a
-          persistent log rather than the in-process signal plus task-queue retries this decision uses.
+          persistent log rather than the in-process call this decision uses.
     - Cons:
         - The event bus is not enabled in a stock edx-platform deployment, so requiring it makes
           Kafka or Redis mandatory infrastructure for any deployment that wants competencies.
     - Why rejected: mandating event-bus infrastructure is a far larger operational imposition than
-      this feature should force on operators. The chosen design runs over ordinary in-process
-      delivery and can take advantage of the bus where a deployment already runs one, without
-      requiring it.
+      this feature should force on operators. The chosen design records through a direct in-process
+      call inside the grade task and needs no bus at all; a deployment that already runs one gains
+      nothing this recording path requires.
 
 7. Correctness by keyed partitioning.
 
@@ -206,24 +240,39 @@ Rejected Alternatives
     - Why rejected: this was the lock-free alternative worth considering only while correctness
       required serialization. Under monotone merge, correctness no longer requires that any two
       same-learner events be serialized at all, so partitioning solves a problem this decision no
-      longer has. It would also couple the recorder to a transport-level routing contract (native on
-      Kafka, application-level sharding on Redis) that monotonicity makes unnecessary.
+      longer has. It also presumes an event transport to partition, which the chosen synchronous
+      in-transaction call does not have.
 
-8. Record inside a subsection-grade transaction.
+8. Record asynchronously in a task openedx-core enqueues from an event, in its own transaction (the previous form of this decision).
 
-    edx-platform already synchronously, in-process, handles subsection grade changes.
-    This would wrap a subsection grade change in a transaction that includes competency
-    mastery updates.
+    edx-platform emits a subsection-grade-changed openedx-event; an openedx-core receiver enqueues a
+    celery task that does the monotone merge and the upward roll-up in its own transaction, separate
+    from edx-platform's grade write.
 
-        - Pros: grade and mastery can never diverge; recording is real-time; no new event type is
-          needed, only a call from code that already runs; and because the leaf and its ancestors
-          recompute in that same transaction (mechanism 2), the whole subtree is airtight inline with
-          no follow-up step.
-        - Cons: mastery work sits on the synchronous grading path, so a slow mastery query or a bug
-          adds latency to, or rolls back, the grade write (grades are the more critical data); and it
-          requires the shared database.
-        - Why rejected: we do not intend for mastery to always be tied to a subsection grade.
-          We've actually proposed tying mastery to several other things (course completion, unit grade
-          (a concept that doesn't exist in the platform currently), problem grade, and rubric criterion grade
-          (also a concept that doesn't exist in the platform currently)), and tying a mastery to a subsection
-          grade would contradict that.
+        - Pros: mastery work is fully isolated from the grade write, so a slow or failing merge can
+          never touch the grade transaction; recording scales as its own horizontally-scalable
+          consumer pool; and it can ride an event bus where a deployment already runs one.
+        - Cons: it adds a second async hop after an already-async grade computation, so mastery trails
+          the grade by the enqueue-and-run delay and can diverge if the task is lost; it requires
+          defining and versioning a new openedx-event, its consumer, and a task queue as the recording
+          path's infrastructure; and the isolation it buys is only necessary if the merge is treated
+          as unsafe to run inline, which mechanism 1's monotone merge and the grade task's idempotent
+          retry (mechanism 9) already make safe.
+        - Why rejected: the grade is already produced in an async task, so recording inline in that
+          task's transaction commits mastery with the grade (mechanism 7) without a second hop, a new
+          event contract, or a separate queue. The async design's real advantage is isolation: a
+          mastery fault never touches the grade write. This decision gives that up deliberately
+          (mechanism 7) in exchange for no grade/mastery divergence and no extra moving parts; a
+          transient fault is handled by the shared retry, and a persistent one is a bug to fix rather
+          than a reason to let mastery drift silently behind the grade.
+
+9. Record inside a subsection-grade transaction, but only ever for the subsection grade.
+
+    Wrap competency mastery updates in edx-platform's subsection-grade transaction, treating that
+    single trigger as the one and only recording entry point.
+
+        - Why rejected: mastery is not meant to be tied to the subsection grade alone. It is also
+          intended to derive from course completion, unit grade, problem grade, and rubric criterion
+          grade, so a subsection-grade-only coupling would contradict that direction. This decision
+          keeps the in-transaction recording but generalizes it (mechanism 6): the subsection grade is
+          the first trigger to record in its producing transaction, not the only one that ever will.

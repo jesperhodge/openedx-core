@@ -64,10 +64,11 @@ query. The design's job is therefore to keep rows narrow, keep every read on an 
 append-only history off the hot path, and push cross-learner analytics to an analytics store rather
 than the relational table.
 
-openedx-core also cannot read edx-platform's grade tables directly and receives grade changes only
-as ``openedx-events`` events (:ref:`openedx-learning-adr-0004`). Leaf mastery is therefore recorded
-from the grade carried by the event when it arrives; the relational tables here are the record of
-that computation, not a cache that can be rebuilt by re-reading a grade later.
+openedx-core also cannot read edx-platform's grade tables directly. Instead, edx-platform's async
+subsection-grade task pushes the grade by calling openedx-core synchronously, inside the grade-write
+transaction (:ref:`openedx-learning-adr-0004`). Leaf mastery is therefore recorded from the grade
+passed by that call; the relational tables here are the record of that computation, not a cache that
+can be rebuilt by re-reading a grade later.
 
 Decision
 --------
@@ -146,28 +147,33 @@ work, and consciously declines the ones edx-platform did not need:
       effective-source-timestamp out-of-order defense in :ref:`openedx-learning-adr-0004`
       (mirroring edx-platform's check of the source score's timestamp before trusting a queued
       recompute).
-    - *Batch the read and write paths, where batching is used.* When a deployment adopts the
-      optional batching described in :ref:`openedx-learning-adr-0004`, the recorder reads current
-      statuses in bulk and writes leaf ACTIVE (bulk upsert), leaf HISTORY (``bulk_create``), and the
-      rolled-up group/competency rows in a small, fixed number of round-trips per batch, independent
-      of the number of rows in the batch. This is the same "prefetch per cohort, bulk-write" posture
-      edx-platform uses. Recording is correct without batching too (:ref:`openedx-learning-adr-0004`'s
-      monotone merge does not depend on it); batching is a throughput optimization for high-volume
-      deployments, not a correctness mechanism.
+    - *Batch the read and write paths on the mass-recompute route.* The per-grade recording path is
+      one synchronous in-transaction call per grade (:ref:`openedx-learning-adr-0004`) and does not
+      batch. The structural-edit mass recompute below does: it reads current statuses in bulk and
+      writes leaf ACTIVE (bulk upsert), leaf HISTORY (``bulk_create``), and the rolled-up
+      group/competency rows in a small, fixed number of round-trips per chunk, independent of the
+      number of rows in the chunk. This is the same "prefetch per cohort, bulk-write" posture
+      edx-platform uses.
     - *Chunk mass recompute and provide a kill switch.* The bulk recompute triggered by a
       structural criteria edit is chunked by a configurable batch size and can be halted by an
       operational switch, mirroring edx-platform's ``ComputeGradesSetting`` batch size and its
       ``DISABLE_REGRADE_ON_POLICY_CHANGE`` switch, so a large edit cannot become an unbounded
       recompute storm.
-    - *A dedicated database alias and router, baked in from the start.* The learner-status tables
-      (leaf, group, and competency ACTIVE and HISTORY) are assigned to a dedicated Django database
-      alias through a database router, mirroring edx-platform's courseware-history router
-      (``StudentModuleHistoryExtended``). The alias defaults to the main database, so a stock
-      deployment runs everything on one database and gains no new mandatory infrastructure, keeping
-      faith with :ref:`openedx-learning-adr-0004`'s no-new-mandatory-infrastructure value; a large
-      deployment points the alias at a separate physical database purely through settings, with no
-      schema change and no data migration. Building the router now, rather than deferring it, is what
-      makes that later split a configuration change instead of a migration on a billion-row table.
+    - *A dedicated database alias and router for the leaf HISTORY table, baked in from the start.*
+      The leaf HISTORY table (``StudentCompetencyCriteriaStatusHistory``), the dominant table in this
+      model, is the one learner-status table assigned to a dedicated Django database alias through a
+      database router, mirroring edx-platform's courseware-history router
+      (``StudentModuleHistoryExtended``), which is likewise a history table. The alias defaults to the
+      main database, so a stock deployment runs everything on one database and gains no new mandatory
+      infrastructure, keeping faith with :ref:`openedx-learning-adr-0004`'s
+      no-new-mandatory-infrastructure value; a large deployment points the alias at a separate physical
+      database purely through settings, with no schema change and no data migration. Building the router
+      now, rather than deferring it, is what makes that later split a configuration change instead of a
+      migration on a billion-row table. Every other learner-status table (all three ACTIVE tables and
+      the group and competency HISTORY tables) stays on the grade-write database: the recorder's ACTIVE
+      writes and roll-ups commit in edx-platform's grade transaction (:ref:`openedx-learning-adr-0004`),
+      which a single transaction spanning two databases could not do, so only the leaf HISTORY append,
+      which may sit on the separate alias, is done outside that transaction as a best-effort write.
     - *No database-level foreign keys to large, widely-used tables.* Independently of the alias
       boundary above, a large per-learner table carries no database-level foreign key to a large,
       widely-used table, the user table above all. A database-level foreign key would make every
@@ -178,8 +184,9 @@ work, and consciously declines the ones edx-platform did not need:
       ``db_constraint=False``, and ``PersistentSubsectionGrade`` stores the learner as a plain
       ``user_id`` with no foreign key at all. The references to the user and to the
       criteria-definition tables are therefore logical (no database-level constraint); the smaller,
-      static criteria references would tolerate a real constraint but are kept logical too because
-      the alias boundary above can place them in a separate database. Referential integrity and the
+      static criteria references would tolerate a real constraint but are kept logical too, for
+      uniformity with the user reference and because the leaf HISTORY table's references may cross the
+      separate alias above. Referential integrity and the
       delete protection of :ref:`openedx-learning-adr-0002` are enforced in application code, not by
       a database constraint.
     - *No table partitioning or sharding.* These remain consciously rejected: the edx-platform
@@ -225,8 +232,8 @@ is strictly advance-only. Cross-learner analytics and reporting are served by an
 (ClickHouse/Aspects), not by aggregate queries over these relational tables. Because HISTORY records
 only advances, its growth is already bounded by monotonicity (learners x nodes x a small constant),
 so no retention or tiering policy is required to keep it workable; one may still be added later, and
-the database router above lets the HISTORY tables be relocated to a separate database if a deployment
-prefers. Emitting a status-change event for downstream notification is also out of scope here.
+the database router above lets the leaf HISTORY table be relocated to a separate database if a
+deployment prefers. Emitting a status-change event for downstream notification is also out of scope here.
 
 Accepted tradeoffs
 ------------------
