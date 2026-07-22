@@ -168,14 +168,31 @@ work, and consciously declines the ones edx-platform did not need:
       deployment points the alias at a separate physical database purely through settings, with no
       schema change and no data migration. Building the router now, rather than deferring it, is what
       makes that later split a configuration change instead of a migration on a billion-row table.
-      Foreign keys that would cross the alias boundary (a learner-status row referencing a
-      criteria-definition row, and the reference to the user) are declared without database-level
-      constraints, as edx-platform does for ``PersistentSubsectionGrade.user_id``, so the tables can
-      live in different databases; the delete protection of :ref:`openedx-learning-adr-0002` is
-      therefore enforced in application code, not by a database constraint.
-    - *No table partitioning, sharding, or read-replica routing.* These remain consciously rejected:
-      the edx-platform grades app operates at scale without any of them, and narrow rows plus
-      indexes plus dedup were sufficient. They can be revisited if a specific need is proven.
+    - *No database-level foreign keys to large, widely-used tables.* Independently of the alias
+      boundary above, a large per-learner table carries no database-level foreign key to a large,
+      widely-used table, the user table above all. A database-level foreign key would make every
+      write of a billion-row leaf row take a shared lock on the referenced user row to check the
+      constraint, putting the hot user table on the recording path's lock footprint, and would make
+      adding or validating the constraint a migration over the whole billion-row table. edx-platform
+      declines the same cost: ``StudentModule`` declares its user foreign key with
+      ``db_constraint=False``, and ``PersistentSubsectionGrade`` stores the learner as a plain
+      ``user_id`` with no foreign key at all. The references to the user and to the
+      criteria-definition tables are therefore logical (no database-level constraint); the smaller,
+      static criteria references would tolerate a real constraint but are kept logical too because
+      the alias boundary above can place them in a separate database. Referential integrity and the
+      delete protection of :ref:`openedx-learning-adr-0002` are enforced in application code, not by
+      a database constraint.
+    - *No table partitioning or sharding.* These remain consciously rejected: the edx-platform
+      grades app operates at scale without them, and narrow rows plus indexes plus dedup were
+      sufficient. They can be revisited if a specific need is proven.
+    - *Optional read-replica offload for heavy reads.* The heavy read-only paths (the instructor and
+      reporting reads, and optionally the learner dashboard) are served from a read replica when a
+      deployment has one configured, and fall back to the primary when it does not, so no replica
+      becomes mandatory infrastructure. This uses ``edx_django_utils``'s ``read_replica_or_default()``
+      helper, the same mechanism edx-platform applies to its heavy ``StudentModule`` reads
+      (``all_submitted_problems_read_only``). The recorder's own reads are never routed to a replica:
+      they feed the roll-up write and take the row locks in :ref:`openedx-learning-adr-0004`, so a
+      replica's lag could compute a roll-up from stale siblings; they always use the primary.
 
 **Advance-only banking, monotonic.** Once a node reaches ``Demonstrated`` its ACTIVE row is retained
 ("banked"): the recorder never automatically regresses it, not on a later downward grade correction

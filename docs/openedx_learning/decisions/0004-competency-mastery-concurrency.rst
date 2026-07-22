@@ -59,7 +59,11 @@ row-level lock on the parent row (a ``SELECT ... FOR UPDATE``) before reading it
 updates that touch the same parent for the same learner take turns, and the second reads the first's
 committed children and computes from the complete picture. Locks are taken child-before-parent up
 the path to the root, a consistent order, so concurrent updates cannot deadlock. This is an ordinary
-single-row lock.
+single-row lock. Every read the recorder makes, here and in the batch path (mechanism 6), runs
+against the primary database and never a read replica: these reads feed the roll-up write and take
+the row locks above, so a replica's lag would compute a roll-up from stale siblings. The
+read-replica offload in :ref:`openedx-learning-adr-0005` is reserved for the read-only dashboard and
+reporting paths.
 
 **3. Out-of-order defense.** A change older than the current leaf's effective source timestamp is
 ignored, so a late arrival cannot regress a newer status. The monotone merge already enforces
