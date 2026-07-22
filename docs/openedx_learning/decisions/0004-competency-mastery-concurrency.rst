@@ -29,25 +29,12 @@ Two forces shape how recording should happen:
 
 - **Same-learner correctness.** A grade change writes the changed leaf and then re-derives the
   group and competency rows above it. Leaf rows are always correct, since each leaf is a pure
-  function of its own grade. The derived rows are the hazard: two evaluations for the same learner
+  function of its own grade. The derived rows are the hazard: We want to avoid a case where two evaluations for the same learner
   that overlap can each read a stale snapshot of the sibling leaf statuses and each write a derived
-  roll-up computed from an incomplete picture (a *write-skew*). Nothing crashes and no constraint is
-  violated, but a learner's stored competency status can be silently wrong.
+  roll-up computed from an incomplete picture (a *write-skew*).
 
 - **Throughput.** Grading is bursty and spans a very large number of learners, so the recording
   path must keep up under peak load.
-
-**How the grade reaches the recorder.** edx-platform does not compute a subsection grade on the
-request thread. A score change fires a signal whose receiver enqueues a celery task, and that task
-recomputes and persists the subsection grade. Recording competency mastery therefore has a natural
-home: the recorder is called synchronously from inside that already-async task, in the same database
-transaction as the grade write, so mastery is recorded off the request path yet commits with the
-grade it derives from. openedx-core cannot read edx-platform's grade tables and never imports
-edx-platform; edx-platform is the higher layer and calls a public openedx-core API, passing the
-grade as opaque primitives.
-
-The question is how to guarantee same-learner correctness at high throughput while recording inline
-with the grade write, without adding new mandatory infrastructure.
 
 Decision
 --------
@@ -73,64 +60,17 @@ these reads feed the roll-up write and take the row locks above, so a replica's 
 roll-up from stale siblings. The read-replica offload in :ref:`openedx-learning-adr-0005` is
 reserved for the read-only dashboard and reporting paths.
 
-**3. Out-of-order defense.** A change older than the current leaf's effective source timestamp is
-ignored, so a late arrival cannot regress a newer status. The monotone merge already enforces
-this for the stored status; the timestamp check avoids writing a spurious HISTORY row for a
-stale advance.
+**3. Entry point: edx-platform subsection grade change.** edx-platform
+computes subsection grades in an async celery task (`recalculate_subsection_grade_v3`) triggered by a score-change signal, not on the
+request thread. After that task writes the subsection grade, it calls a public openedx-core function
+within the same transaction; this function does the monotone merge and the upward roll-up. This should be generalized as needed to other places that trigger a competency status update.
 
-**4. Advance-only; no automatic regression.** Once a status reaches a level it is banked at every
-level including the leaf (:ref:`openedx-learning-adr-0005`). A downward grade correction does
-not advance the status and writes no HISTORY row, which is what bounds HISTORY by
-monotonicity. Reversing a banked status is a separate administrative action, out of scope
-here.
+**4. ACTIVE writes and roll-ups commit atomically with the grade, or the whole task rolls back and retries.**
 
-**5. Entry point: a synchronous call from the transaction that produces the grade.** edx-platform
-computes subsection grades in an async celery task triggered by a score-change signal, not on the
-request thread. After that task writes the subsection grade, it calls a public openedx-core API
-within the same transaction; the API does the monotone merge and the upward roll-up. No
-openedx-event is emitted or consumed on the mastery path, and openedx-core enqueues no task of its
-own. Because edx-platform is the higher layer it may call openedx-core (never the reverse), and the
-grade crosses the boundary as opaque primitives (user id, subsection key, score, source timestamp),
-so no edx-platform type enters openedx-core.
-
-**6. Recording is a general pattern: record inside whichever transaction produces the source signal.**
-Subsection grade is the only trigger in scope today and the first instance of this pattern. Mastery is
-also intended to derive from other sources (course completion, unit grade, problem grade, and rubric
-criterion grade); each, when it is built, records by calling the same openedx-core API from inside
-the transaction that writes its own source data. Recording is therefore not coupled specifically to
-the subsection grade (contrast rejected alternative 9): it is the first
-application of a uniform "record in the producer's transaction" contract that every future trigger
-satisfies in turn.
-
-**7. ACTIVE writes and roll-ups commit atomically with the grade, or the whole task rolls back and retries.**
-The leaf ACTIVE merge and the upward group and competency roll-up (mechanism 2) run inside the grade
-task's transaction, so the leaf and every affected ancestor commit together with the grade or not at
-all. A failure in the mastery work is not swallowed: it rolls back the entire transaction, grade
-included, and the grade task retries (mechanism 9). Because the grade recompute is idempotent and the
-merge is monotone (mechanism 1), the retry redoes both together and reaches the same result, so grade
-and mastery never diverge. The accepted cost is that a persistent mastery fault (a bug, not a
-transient error) blocks the grade write until it is fixed, even though grades are the more critical
-data; a transient fault is absorbed by the retry.
-
-**8. The leaf HISTORY append runs outside the transaction, best effort.** The leaf HISTORY table
-(``StudentCompetencyCriteriaStatusHistory``) is the one learner-status table that may be routed to a
-separate physical database (:ref:`openedx-learning-adr-0005`), and a single transaction cannot span
-two databases. Its append therefore runs after that transaction commits, as a best-effort,
-non-blocking write whose failure is logged and never rolls back the grade or the ACTIVE mastery, so a
-rolled-back-and-retried attempt (mechanism 7) leaves no orphaned audit row.
-The cost is a possibly-missing audit row, not a wrong current status: the leaf ACTIVE row (the
-dashboard's source of truth) and the small group and competency HISTORY rows stay inside the
-transaction on the grade-write database.
-
-**9. Durability rides edx-platform's grade task.** No separate enqueue or retry queue is added for
-mastery. The grade task already retries on failure and its grade recompute is idempotent, so a retry
-redoes the grade and, with it, the in-transaction mastery merge (itself idempotent under mechanism
-1). A dedicated mastery task, and the durability it was there to provide, is therefore not needed.
-
-**10. No batch path on the per-grade route.** Recording is one synchronous call per grade
-transaction; there is no batch producer and no batch event. The only bulk path is the structural-edit
-mass recompute in :ref:`openedx-learning-adr-0005`, which is not tied to any single grade transaction
-and batches its reads and writes there.
+**5. The leaf HISTORY append runs outside the transaction, best effort.** Because the leaf HISTORY table
+(``StudentCompetencyCriteriaStatusHistory``) may be routed to a
+separate physical database (:ref:`openedx-learning-adr-0005`), its append runs after that transaction commits, as a best-effort,
+non-blocking write.
 
 
 Rejected Alternatives
