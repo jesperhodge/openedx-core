@@ -240,11 +240,14 @@ Decision
    3. ``oel_tagging_objecttag(object_id)``
    4. ``CompetencyCriteria(oel_tagging_objecttag_id)``
    5. ``CompetencyCriteria(competency_criteria_group_id)``
-   6. ``StudentCompetencyCriteriaStatus(user_id, competency_criteria_id)``
-   7. ``StudentCompetencyCriteriaGroupStatus(user_id, competency_criteria_group_id)``
-   8. ``StudentCompetencyStatus(user_id, oel_tagging_tag_id)``
-   9. ``CompetencyRuleProfile(scope_code)`` (unique -- at most one profile per distinct scope value; a plain unique constraint on the three raw nullable scope columns would not enforce this, since SQL never treats two ``NULL`` values as equal and this project's MySQL backend does not support the conditional/partial unique indexes that would otherwise route around that; see the ``scope_code`` column in Decision 3)
-   10. ``CompetencyMasteryStatuses(status)`` (unique)
+   6. ``StudentCompetencyCriteriaStatus(user_id, competency_criteria_id)`` (unique)
+   7.  ``StudentCompetencyCriteriaStatusHistory(user_id, competency_criteria_id)``
+   8. ``StudentCompetencyCriteriaGroupStatus(user_id, competency_criteria_group_id)`` (unique)
+   9.  ``StudentCompetencyCriteriaGroupStatusHistory(user_id, competency_criteria_group_id)``
+   10. ``StudentCompetencyStatus(user_id, oel_tagging_tag_id)`` (unique)
+   11. ``StudentCompetencyStatusHistory(user_id, oel_tagging_tag_id)``
+   12. ``CompetencyRuleProfile(scope_code)`` (unique -- at most one profile per distinct scope value; a plain unique constraint on the three raw nullable scope columns would not enforce this, since SQL never treats two ``NULL`` values as equal and this project's MySQL backend does not support the conditional/partial unique indexes that would otherwise route around that; see the ``scope_code`` column in Decision 3)
+   13. ``CompetencyMasteryStatuses(status)`` (unique)
 
 6. Learner progress status concepts (``StudentCompetency*Status`` database tables)
 
@@ -256,6 +259,13 @@ Decision
    - ``StudentCompetencyCriteriaGroupStatus`` tracks status at ``CompetencyCriteriaGroup`` node level.
    - ``StudentCompetencyStatus`` tracks top-level competency demonstration state.
    - All learner status rows use a shared lookup table (``CompetencyMasteryStatuses``) so status semantics live in one place and student status tables stay structurally consistent.
+
+   Append-only history tables:
+
+   - ``StudentCompetencyCriteriaStatusHistory``
+   - ``StudentCompetencyCriteriaGroupStatusHistory``
+   - ``StudentCompetencyStatusHistory``
+
 
    Intended update flow (bottom-up materialization):
 
@@ -275,9 +285,9 @@ Decision
 
    2. Add new database table for ``StudentCompetencyCriteriaStatus`` with these columns:
 
-      1. ``id``: unique primary key
+      1. ``id``: unique 64-bit primary key (``BigAutoField``); see :ref:`openedx-learning-adr-0005`.
       2. ``competency_criteria_id``: Foreign key to ``CompetencyCriterion.id``
-      3. ``user_id``: Foreign key pointing to user_id (presumably the learner's id, although it appears that it is possible for staff to get grades as well) in ``auth_user`` table
+      3. ``user_id``: Foreign key with ``db_constraint=False`` pointing to user_id (presumably the learner's id, although it appears that it is possible for staff to get grades as well) in ``auth_user`` table
       4. ``status_id``: Foreign key to ``CompetencyMasteryStatuses.id``
       5. ``created``: The timestamp at which the student's criterion status was set.
 
@@ -285,7 +295,7 @@ Decision
 
       1. ``id``: unique primary key
       2. ``competency_criteria_group_id``: Foreign key to ``CompetencyCriteriaGroup.id``
-      3. ``user_id``: Foreign key pointing to user_id (presumably the learner's id, although it appears that it is possible for staff to get grades as well) in ``auth_user`` table
+      3. ``user_id``: Foreign key with ``db_constraint=False`` pointing to user_id (presumably the learner's id, although it appears that it is possible for staff to get grades as well) in ``auth_user`` table
       4. ``status_id``: Foreign key to ``CompetencyMasteryStatuses.id``
       5. ``created``: The timestamp at which the student's criteria-group status was set.
 
@@ -293,7 +303,7 @@ Decision
 
       1. ``id``: unique primary key
       2. ``oel_tagging_tag_id``: Foreign key pointing to Tag id
-      3. ``user_id``: Foreign key pointing to user_id (presumably the learner's id, although it appears that it is possible for staff to get grades as well) in ``auth_user`` table
+      3. ``user_id``: Foreign key with ``db_constraint=False`` pointing to user_id (presumably the learner's id, although it appears that it is possible for staff to get grades as well) in ``auth_user`` table
       4. ``status_id``: Foreign key to ``CompetencyMasteryStatuses.id``. This table should have a constraint to only allow status values of “Demonstrated” and “PartiallyAttempted” since it represents overall competency demonstration state, not in-progress states.
       5. ``created``: The timestamp at which the student's competency status was set.
 

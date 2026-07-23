@@ -1,7 +1,7 @@
 .. _openedx-learning-adr-0005:
 
-5. How should learner competency mastery be stored at scale?
-=============================================================
+5. How should learner competency status be stored at scale?
+===========================================================
 
 Status
 ------
@@ -14,6 +14,15 @@ internal ``CompetencyCriteriaGroup`` node combines child nodes with an ``AND``/`
 ``logic_operator``, can be scoped to a course run, and can nest under a parent group. A
 ``CompetencyCriterion`` leaf is the tree's terminal node: it points at one tag/object association
 and a rule.
+
+The student mastery statuses tied to these tree nodes are stored in:
+- `StudentCompetencyCriteriaStatus` (leaf nodes)
+- `StudentCompetencyCriteriaGroupStatus` (middle nodes)
+- `StudentCompetencyStatus` (top-level)
+
+For each of these, we also need to persist history, because we need an audit trail to understand
+why a learner did or didn't achieve mastery of a particular competency or any of the associated "measurement instruments"
+(gradeable subsections).
 
 Storing every leaf multiplies out at scale. A course can carry on the order of 200 leaf criteria,
 so the leaf level is where the row count concentrates: the leaf table (learners x attempted
@@ -69,6 +78,7 @@ database router, mirroring edx-platform's courseware-history router
 main database.
 
 **No database-level foreign keys to `user_id` on ACTIVE or HISTORY table.**
+Foreign keys to `user_id` must have `db_constraint=False` set.
 
 **Enable read-replica offload for heavy reads for the leaf tables.**
 This only applies to the ACTIVE `StudentCompetencyCriteriaStatus` and HISTORY
