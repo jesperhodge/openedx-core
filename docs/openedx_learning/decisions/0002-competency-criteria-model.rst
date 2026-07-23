@@ -7,6 +7,8 @@ Context
 -------
 Competency Based Education (CBE) requires that the LMS have the ability to track learners' mastery of competencies through the means of competency achievement criteria. For example, in order to demonstrate that I have mastered the Multiplication competency, I need to have earned 75% or higher on Assignment 1 or Assignment 2. The association of the competency, the threshold, the assignments, and the logical OR operator together make up the competency achievement criteria. Course Authors and Platform Administrators need a way to set up these associations in Studio so that their outcomes can be calculated as learners complete their materials. This is an important prerequisite for being able to display competency progress dashboards to learners and staff to make Open edX the platform of choice for those using the CBE model.
 
+In the vast majority of cases, the rule used to evaluate mastery (the threshold, for example "75% or higher") is the same across the entire Open edX instance, so the system-wide default is the common case. The scoping and override mechanisms described below exist to support less common exceptions to that default: a taxonomy-level default is needed when a competency's threshold should differ from the system-wide one; an organization-level default is needed because Open edX already allows a single taxonomy to be associated with multiple organizations, so organizations sharing a taxonomy may still expect different thresholds (for example, a general skill taxonomy used differently by two departments), or a taxonomy should not be locally weakened by any organization at all (for example, one adopted from a third-party). Course- and criterion-level overrides support finer-grained exceptions beyond that.
+
 In order to support these use cases, we need to be able to model these rules (competency achievement criteria) and their association to the tag/competency to be demonstrated and the object (course, subsection, unit, etc) or objects that are used as the means to assess competency mastery. We also need to leave flexibility for a variety of different types as well as groupings to be able to develop a variety of pathways of different combinations of objects that can be used by learners to demonstrate mastery of a competency.
 
 Additionally, we need to be able to track each learner's progress towards competency demonstration as they begin receiving results for their work on objects associated with the competency via competency achievement criteria.
@@ -35,6 +37,7 @@ Decision
    Relationship to other concepts:
 
    - ``CompetencyRuleProfile`` can be scoped to a ``CompetencyTaxonomy``.
+   - The override tiebreak (``taxonomy_overrides_org``, below) is recorded on the taxonomy rather than on the organization-scoped profile: a single taxonomy can compete against many organization-scoped profiles (Decision 4), so the taxonomy is the one place a single answer can be set that automatically applies to all of them, current or future, rather than needing to be repeated on each org-scoped row.
    - ``CompetencyCriteriaGroup`` and ``CompetencyCriterion`` are only valid for competencies from enabled taxonomies.
 
    A taxonomy listed in this table:
@@ -53,7 +56,9 @@ Decision
    - has no competency-specific constraints on associated content objects.
 
    This new database table will have the following columns:
+   
    1. ``taxonomy_ptr_id``: Primary key and one-to-one foreign key to ``oel_tagging_taxonomy.id``.
+   2. ``taxonomy_overrides_org``: Boolean, defaults to ``false``. Used only while computing which single ``CompetencyRuleProfile`` to assign to a ``CompetencyCriterion`` (Decision 4). If, for a criterion's context, both an organization-scoped profile row and a taxonomy-scoped profile row exist as candidates, this field decides which one gets assigned: ``false`` (default) assigns the organization-scoped row; ``true`` assigns this taxonomy's own row instead, so it cannot be overridden by an organization. Once assigned, the criterion stores that one profile's id and this field plays no further part. This field is created now but read by no code path in this phase, since organization-scoped profiles don't exist yet and the conflict it resolves can't occur; see the MVP note in Decision 4.
 
    Lifecycle rules for this parent/child pair:
 
@@ -81,7 +86,7 @@ Decision
    4. ``course_id``: Nullable foreign key to ``openedx_catalog_courserun.id`` for the course that scopes this criteria tree.
    5. ``name``: string
    6. ``ordering``: Indicates evaluation sequence number for this criteria group. This defines deterministic evaluation order for siblings during read-time evaluation and event-driven recomputation, and enables short-circuit evaluation.
-   7. ``logic_operator``: Either “AND” or “OR” or null. This determines how children are combined at a group node ("AND" or "OR"). Deliberately no negation operator: keeping every combinator monotone (advancing a child status can only advance or leave unchanged its parent, never regress it) is what lets :ref:`openedx-learning-adr-0004` record concurrently without coordination.
+   7. ``logic_operator``: Either “AND” or “OR” or null. This determines how children are combined at a group node ("AND" or "OR").
 
    Example: A root group uses "OR" with two child groups.
 
@@ -113,19 +118,30 @@ Decision
 
    Relationship to other concepts:
 
-   - Can be scoped by taxonomy, course, and/or organization.
+   - Each row is scoped by at most one of taxonomy, course, or organization (or by none, for the system default). A check constraint enforces that at most one of ``organization_id``, ``course_id``, and ``competency_taxonomy_id`` is non-null per row. See Decision 4 for how a criterion is assigned a profile when rows in more than one of these scopes could apply to it.
+   - At most one profile row may exist per distinct scope value. This is enforced by a unique constraint on the generated ``scope_code`` column (Decision 5), not a plain unique constraint on the three raw scope columns; see the ``scope_code`` column definition below for why.
+   - The system default is the single profile row where all three scope fields are null. ``scope_code`` is never null, including for this row (see below), so its singularity is enforced by the same unique constraint as every other profile rather than a separate procedural guarantee; it is seeded once via migration and never created or deleted through the profile API. Its ``rule_type``/``rule_payload`` can be edited through the profile API like any other profile.
    - Is referenced by ``CompetencyCriterion``, which may override its type/payload.
+   - Never hard-deleted; retirement is archive-only (Decision 7).
 
    This new database table will have the following columns:
 
    1. ``id``: unique primary key
    2. ``organization_id``: The ``organization_id`` of the organization that this competency rule profile is scoped to. Null if it is not scoped to a specific organization.
    3. ``course_id``: The ``course_id`` of the course that this competency rule profile is scoped to. Null if it is not scoped to a specific course.
-   4. ``competency_taxonomy_id``: The ``CompetencyTaxonomy.taxonomy_ptr_id`` of the competency taxonomy that this competency rule profile is scoped to.
-   5. ``rule_type``: “View”, “Grade”, “MasteryLevel” (Only “Grade” will be supported for now)
-   6. ``rule_payload``: JSON payload keyed by ``rule_type`` to avoid freeform strings. It is structured JSON (not arbitrary freeform data): each ``rule_type`` defines the allowed payload shape and required keys, and validation enforces this contract. JSON is used instead of fixed columns like ``op``, ``value``, and ``scale`` so that future rule types (for example, ``MasteryLevel`` thresholds or plugin-defined evaluators such as CEL-based rules) can add their own fields without repeated schema migrations or many nullable columns. Examples:
+   4. ``competency_taxonomy_id``: The ``CompetencyTaxonomy.taxonomy_ptr_id`` of the competency taxonomy that this competency rule profile is scoped to. Null if it is not scoped to a specific taxonomy.
+   5. ``scope_code``: A database-generated column that is always in the fixed, trivially-parseable format ``"org:X,course:Y,taxonomy:Z"``, with each segment left blank when the corresponding scope column is null: for example ``"org:5,course:,taxonomy:"``, ``"org:,course:12,taxonomy:"``, ``"org:,course:,taxonomy:7"``, or ``"org:,course:,taxonomy:"`` for the system default. ``scope_code`` is therefore never null, including for the system default row. This exists because SQL never treats two ``NULL`` values as equal for uniqueness purposes, so a plain unique constraint across the three nullable scope columns would not stop two rows from sharing the same scope (for example two rows both with ``organization_id=5`` and the other two columns null). Collapsing the scope into one generated, always-non-null column sidesteps that, and does so identically on every database backend this project supports, including MySQL, which does not support the conditional/partial unique indexes that would otherwise be the usual fix. ``scope_code`` embeds internal ID references and exists solely to enforce uniqueness; it is not intended to be exported or exposed outside this system.
+   6. ``rule_type``: “View”, “Grade”, “MasteryLevel” (Only “Grade” will be supported for now)
+   7. ``rule_payload``: JSON payload keyed by ``rule_type`` to avoid freeform strings. It is structured JSON (not arbitrary freeform data): each ``rule_type`` defines the allowed payload shape and required keys, and validation enforces this contract. JSON is used instead of fixed columns like ``op``, ``value``, and ``scale`` so that future rule types (for example, ``MasteryLevel`` thresholds or plugin-defined evaluators such as CEL-based rules) can add their own fields without repeated schema migrations or many nullable columns. Examples:
 
-      1. ``Grade``: ``{"op": "gte", "value": 75, "scale": "percent"}``
+      1. ``Grade``: ``{"op": "gte", "value": 0.75, "scale": "percent"}``. Allowed ``op`` values: ``gte``, ``lte``, ``eq``. ``value`` must be a fraction between 0.0 and 1.0 inclusive, matching the platform's existing fractional grade representation, not a 0-100 scale.
+   8. ``archived``: Boolean, defaults to false. Set instead of deleting a profile that is no longer wanted. Archived profiles are hidden from authoring and new associations but remain queryable, so existing ``CompetencyCriterion`` rows and learner status history stay resolvable.
+
+   A check constraint requires that at most one of ``organization_id``, ``course_id``, and ``competency_taxonomy_id`` is non-null on any row, matching the scoping rule above.
+
+   Editing a profile may change ``rule_type``/``rule_payload`` only; scope fields are immutable after creation, to avoid silently re-scoping criteria that already resolved to this profile.
+
+   MVP note: only taxonomy-scoped and system-default profiles are created; every profile row created in this phase has ``course_id`` and ``organization_id`` null. Enabling course- or organization-scoped profiles later needs no schema change here -- the columns, the uniqueness constraint, and the re-assignment behavior (Decision 4) already support them.
 
 4. ``CompetencyCriterion`` concept (``CompetencyCriteria`` database table)
 
@@ -142,11 +158,80 @@ Decision
    1. ``id``: unique primary key
    2. ``competency_criteria_group_id``: Foreign key to ``CompetencyCriteriaGroup.id``.
    3. ``oel_tagging_objecttag_id``: Tag/Object Association id
-   4. ``competency_rule_profile_id``: Nullable FK to the ``CompetencyRuleProfile`` applied to this criterion. If null, evaluate using fallback lookup order: taxonomy-scoped profile, then course-scoped profile, then organization-scoped profile, then system default.
+   4. ``competency_rule_profile_id``: Nullable FK to the ``CompetencyRuleProfile`` applied to this criterion.
    5. ``rule_type_override``: Nullable enumerated rule type: “View”, “Grade”, “MasteryLevel” (Only “Grade” will be supported for now). When set, this overrides the ``rule_type`` in the associated ``CompetencyRuleProfile`` for this criterion.
    6. ``rule_payload_override``: Nullable JSON payload keyed by ``rule_type`` to avoid freeform strings. When set, this overrides the ``rule_payload`` in the associated ``CompetencyRuleProfile`` for this criterion. The same typed/validated payload contract as ``rule_payload`` applies. Examples:
 
-      1. ``Grade``: ``{"op": "gte", "value": 75, "scale": "percent"}``
+      1. ``Grade``: ``{"op": "gte", "value": 0.75, "scale": "percent"}``. Allowed ``op`` values: ``gte``, ``lte``, ``eq``. ``value`` must be a fraction between 0.0 and 1.0 inclusive, matching the platform's existing fractional grade representation, not a 0-100 scale.
+
+   Exactly one of the following holds for a given criterion, never both, never neither:
+
+   (a) ``competency_rule_profile_id`` is set and both override fields are null, or
+   (b) ``competency_rule_profile_id`` is null and both override fields are set.
+
+   ``competency_rule_profile_id`` is not assigned once and left alone. The same assignment computation -- using whatever scope the relevant authoring screen operates in, resolved per the table below -- is re-run at each of these points, and each one writes a new value:
+
+   1. Creation: the authoring screen that creates the criterion assigns it using the scope that screen itself operates in (for example, adding Competency Criteria to the Course Outline page would have it supply its own course id; the Competency Management page will supply its own taxonomy id). This is independent of ``CompetencyCriteriaGroup.course_id``, which scopes evaluation windowing (Decision 2), not rule assignment; the two may coincidentally match but neither determines the other.
+   2. A more specific profile is created later that would now apply to an existing criterion: that criterion is reassigned to it. Treated as an edit for the in-use warning (ADR 0003 Decision 4).
+   3. A user sets a per-criterion override (for example, editing a ``CompetencyCriteriaGroup``'s default rule, which cascades to every ``CompetencyCriterion`` under that group): ``competency_rule_profile_id`` is set to null and the override fields are set instead.
+   4. A user's override is changed to match what the computation in (1)/(2) would already produce for this criterion: the criterion is reassigned back to that profile and the override fields are cleared, rather than keeping a redundant override in place.
+
+   (A future authoring action to revert a criterion to the next-closest scope, once course/organization scoping exists, would be a fifth trigger using the same computation; out of scope for this phase.)
+
+   In no case is the FK re-resolved dynamically at evaluation time -- only these explicit write events change it.
+
+   Which profile a criterion is assigned, by which profile rows exist for its context:
+
+   .. list-table::
+      :header-rows: 1
+
+      * - Course profile exists?
+        - Org profile exists?
+        - Taxonomy profile exists?
+        - Assigned
+        - Notes
+      * - Yes
+        - (any)
+        - (any)
+        - Course
+        - Always wins outright, no exceptions.
+      * - No
+        - Yes
+        - Yes
+        - See below
+        - The only contested case.
+      * - No
+        - Yes
+        - No
+        - Organization
+        - Nothing else to compete with.
+      * - No
+        - No
+        - Yes
+        - Taxonomy
+        - Nothing else to compete with.
+      * - No
+        - No
+        - No
+        - System default
+        - Nothing else exists.
+
+   The contested case (no course profile; both an organization-scoped row and a taxonomy-scoped row exist) is resolved by ``CompetencyTaxonomy.taxonomy_overrides_org`` (Decision 1):
+
+   .. list-table::
+      :header-rows: 1
+
+      * - ``taxonomy_overrides_org``
+        - Example
+        - Assigned
+      * - ``false`` (default)
+        - A general skill taxonomy ("Communication") used by multiple departments, each wanting its own threshold
+        - Organization
+      * - ``true``
+        - A taxonomy adopted from a third-party standard body ("Nursing"), which should not be locally weakened
+        - Taxonomy
+
+   MVP note: only taxonomy-scoped and system-default profiles are created, so every ``CompetencyCriterion`` created in this phase is assigned one of those two -- the only authoring screens that exist today (Competency Management, and eventually Libraries) supply a competency tag but no course or organization. Organization scoping in particular has no defined source yet: no authoring screen has been decided to expose an organization context, so there is nothing to assign an organization-scoped profile from until that is decided. Course- and organization-scoped profiles, and therefore both tables above, are dormant until those scope levels are built; no schema change is needed to enable them then.
 
 5. Indexes for common lookups
 
@@ -155,68 +240,29 @@ Decision
    3. ``oel_tagging_objecttag(object_id)``
    4. ``CompetencyCriteria(oel_tagging_objecttag_id)``
    5. ``CompetencyCriteria(competency_criteria_group_id)``
-   6. ``StudentCompetencyCriteriaStatus(user_id, competency_criteria_id)`` (unique; ACTIVE current row)
-   7. ``StudentCompetencyCriteriaGroupStatus(user_id, competency_criteria_group_id)`` (unique; ACTIVE current row)
-   8. ``StudentCompetencyStatus(user_id, oel_tagging_tag_id)`` (unique; ACTIVE current row)
-   9. ``StudentCompetencyCriteriaStatusHistory(user_id, competency_criteria_id, created)`` (point-in-time reconstruction)
-   10. ``StudentCompetencyCriteriaGroupStatusHistory(user_id, competency_criteria_group_id, created)``
-   11. ``StudentCompetencyStatusHistory(user_id, oel_tagging_tag_id, created)``
-   12. ``CompetencyRuleProfile(competency_taxonomy_id, course_id, organization_id)``
-   13. ``CompetencyMasteryStatuses(status)`` (unique)
+   6. ``StudentCompetencyCriteriaStatus(user_id, competency_criteria_id)``
+   7. ``StudentCompetencyCriteriaGroupStatus(user_id, competency_criteria_group_id)``
+   8. ``StudentCompetencyStatus(user_id, oel_tagging_tag_id)``
+   9. ``CompetencyRuleProfile(scope_code)`` (unique -- at most one profile per distinct scope value; a plain unique constraint on the three raw nullable scope columns would not enforce this, since SQL never treats two ``NULL`` values as equal and this project's MySQL backend does not support the conditional/partial unique indexes that would otherwise route around that; see the ``scope_code`` column in Decision 3)
+   10. ``CompetencyMasteryStatuses(status)`` (unique)
 
 6. Learner progress status concepts (``StudentCompetency*Status`` database tables)
 
-   When a completion event (a subsection grade change, delivered as described in
-   :ref:`openedx-learning-adr-0004`) is evaluated for an object, the learner's status in earning the
-   competency is determined and tracked. The design:
-
-   - Stores results at each level (leaf, group, competency) so reads never recompute.
-   - Splits each level into two tables:
-
-     - ACTIVE: one current row per learner and node, updated in place. Current status is a direct
-       lookup on this row.
-     - HISTORY: append-only, one row per genuine status advance. This is the audit and point-in-time
-       record.
-
-   - Bounds HISTORY growth: because mastery is monotonic (:ref:`openedx-learning-adr-0005`), advances
-     per node are capped by the status lattice, so HISTORY grows with learners and nodes, not with
-     time.
-
-   These are the large per-learner tables in this model, so they follow the scale posture of
-   :ref:`openedx-learning-adr-0005` (mirroring edx-platform's persistent grades):
-
-   - 64-bit ``BigAutoField`` primary key.
-   - Narrow rows.
-   - Per-read-path composite indexes (Decision 5).
-   - A dedicated database alias reached through a router that defaults to the main database.
-   - Logical foreign keys to the criteria-definition tables and to the user, declared without
-     database-level constraints. The tables can therefore live in a different database from the
-     definitions, with referential integrity and the delete protection of Decision 7 enforced in
-     application code.
+   When a completion event (graded, completed, mastered, etc.) occurs for an object, determine and track the learner's status in earning the competency. To reduce recalculation frequency, store results at each level.
 
    Relationship to other concepts:
 
-   - ``StudentCompetencyCriteriaStatus`` / ``StudentCompetencyCriteriaStatusHistory`` track status at
-     the ``CompetencyCriterion`` leaf level. A leaf is atomic, so its status is only ``Demonstrated``
-     or ``AttemptedNotDemonstrated``.
-   - ``StudentCompetencyCriteriaGroupStatus`` / ``StudentCompetencyCriteriaGroupStatusHistory`` track
-     status at the ``CompetencyCriteriaGroup`` node level.
-   - ``StudentCompetencyStatus`` / ``StudentCompetencyStatusHistory`` track top-level competency
-     demonstration state.
-   - All learner status rows use a shared lookup table (``CompetencyMasteryStatuses``) so status
-     semantics live in one place and the status tables stay structurally consistent.
+   - ``StudentCompetencyCriteriaStatus`` tracks status at ``CompetencyCriterion`` leaf level.
+   - ``StudentCompetencyCriteriaGroupStatus`` tracks status at ``CompetencyCriteriaGroup`` node level.
+   - ``StudentCompetencyStatus`` tracks top-level competency demonstration state.
+   - All learner status rows use a shared lookup table (``CompetencyMasteryStatuses``) so status semantics live in one place and student status tables stay structurally consistent.
 
-   Intended update flow (bottom-up roll-up):
+   Intended update flow (bottom-up materialization):
 
-   - A learner event evaluates one leaf; if its status advances, its ACTIVE row is updated in place
-     and a leaf HISTORY row is appended.
-   - Recompute ancestor ``CompetencyCriteriaGroup`` statuses upward to the root, reading the stored
-     child rows directly.
-   - At each group, evaluate children in ``ordering`` sequence and short-circuit when the group's
-     result is already determined by its ``logic_operator``.
-   - Persist only nodes whose status changed: update the ACTIVE row in place and append a HISTORY row.
-     A banked (``Demonstrated``) status is never regressed, so a downward grade correction advances
-     nothing and writes no HISTORY row.
+   - A learner event updates one ``StudentCompetencyCriteriaStatus`` row.
+   - Recompute ancestor ``CompetencyCriteriaGroup`` statuses upward to the root.
+   - At each group, evaluate children in ``ordering`` sequence and short-circuit when the group's result is already determined by its ``logic_operator``.
+   - Persist only rows whose status changed.
 
    1. Add new database table for ``CompetencyMasteryStatuses`` with these columns:
 
@@ -227,79 +273,42 @@ Decision
 
       - This table is system-owned lookup data and should be treated as immutable configuration, not user-authored rows.
 
-   2. Add the leaf-level tables ``StudentCompetencyCriteriaStatus`` (ACTIVE) and
-      ``StudentCompetencyCriteriaStatusHistory`` (HISTORY). Their columns:
+   2. Add new database table for ``StudentCompetencyCriteriaStatus`` with these columns:
 
-      1. ``id``: 64-bit ``BigAutoField`` primary key
-      2. ``competency_criteria_id``: logical foreign key to ``CompetencyCriterion.id`` (no database-level constraint)
-      3. ``user_id``: logical foreign key to the learner's user id (no database-level constraint)
-      4. ``status_id``: foreign key to ``CompetencyMasteryStatuses.id``
-      5. ``effective_source_timestamp``: UTC timestamp of the source grade change this status was computed from, taken from the event rather than auto-generated. This is source-event time, distinct from ``created`` (persistence time); the out-of-order defense in :ref:`openedx-learning-adr-0004` compares this value, not ``created``.
-      6. ``created``: UTC timestamp of when this row was written to the database (``auto_now_add``). On ACTIVE it marks the first advance for this learner and leaf; on HISTORY, when the advance was appended. It diverges from ``effective_source_timestamp`` whenever an event is processed late or arrives out of order.
-      7. ``modified``: UTC timestamp of the most recent in-place update (``auto_now``), present on ACTIVE only. ACTIVE rows are updated in place as a learner's status advances; HISTORY rows are append-only and never change after insert, so HISTORY has no ``modified`` column.
+      1. ``id``: unique primary key
+      2. ``competency_criteria_id``: Foreign key to ``CompetencyCriterion.id``
+      3. ``user_id``: Foreign key pointing to user_id (presumably the learner's id, although it appears that it is possible for staff to get grades as well) in ``auth_user`` table
+      4. ``status_id``: Foreign key to ``CompetencyMasteryStatuses.id``
+      5. ``created``: The timestamp at which the student's criterion status was set.
 
-      ACTIVE is unique on ``(user_id, competency_criteria_id)``: exactly one current row per learner
-      and leaf, updated in place. HISTORY carries no uniqueness constraint and is append-only: one row
-      per genuine advance, with no row written for a suppressed downward correction.
+   3. Add a new database table for ``StudentCompetencyCriteriaGroupStatus`` with these columns:
 
-   3. Add the group-level tables ``StudentCompetencyCriteriaGroupStatus`` (ACTIVE) and
-      ``StudentCompetencyCriteriaGroupStatusHistory`` (HISTORY). Their columns:
+      1. ``id``: unique primary key
+      2. ``competency_criteria_group_id``: Foreign key to ``CompetencyCriteriaGroup.id``
+      3. ``user_id``: Foreign key pointing to user_id (presumably the learner's id, although it appears that it is possible for staff to get grades as well) in ``auth_user`` table
+      4. ``status_id``: Foreign key to ``CompetencyMasteryStatuses.id``
+      5. ``created``: The timestamp at which the student's criteria-group status was set.
 
-      1. ``id``: 64-bit ``BigAutoField`` primary key
-      2. ``competency_criteria_group_id``: logical foreign key to ``CompetencyCriteriaGroup.id`` (no database-level constraint)
-      3. ``user_id``: logical foreign key to the learner's user id (no database-level constraint)
-      4. ``status_id``: foreign key to ``CompetencyMasteryStatuses.id``
-      5. ``effective_source_timestamp``: as in the leaf tables
-      6. ``created``: as in the leaf tables
-      7. ``modified``: as in the leaf tables (ACTIVE only)
+   4. Add a new database table for ``StudentCompetencyStatus`` with these columns:
 
-      ACTIVE is unique on ``(user_id, competency_criteria_group_id)``: one current row per learner and
-      group, updated in place. HISTORY is append-only with no uniqueness constraint.
-
-   4. Add the competency-level tables ``StudentCompetencyStatus`` (ACTIVE) and
-      ``StudentCompetencyStatusHistory`` (HISTORY). Their columns:
-
-      1. ``id``: 64-bit ``BigAutoField`` primary key
-      2. ``oel_tagging_tag_id``: logical foreign key to the competency ``Tag`` id (no database-level constraint)
-      3. ``user_id``: logical foreign key to the learner's user id (no database-level constraint)
-      4. ``status_id``: foreign key to ``CompetencyMasteryStatuses.id``. Constrained to “Demonstrated” and “PartiallyAttempted” only, since this represents overall competency demonstration state, not in-progress states.
-      5. ``effective_source_timestamp``: as in the leaf tables
-      6. ``created``: as in the leaf tables
-      7. ``modified``: as in the leaf tables (ACTIVE only)
-
-      ACTIVE is unique on ``(user_id, oel_tagging_tag_id)``: one current row per learner and
-      competency, updated in place. HISTORY is append-only with no uniqueness constraint.
+      1. ``id``: unique primary key
+      2. ``oel_tagging_tag_id``: Foreign key pointing to Tag id
+      3. ``user_id``: Foreign key pointing to user_id (presumably the learner's id, although it appears that it is possible for staff to get grades as well) in ``auth_user`` table
+      4. ``status_id``: Foreign key to ``CompetencyMasteryStatuses.id``. This table should have a constraint to only allow status values of “Demonstrated” and “PartiallyAttempted” since it represents overall competency demonstration state, not in-progress states.
+      5. ``created``: The timestamp at which the student's competency status was set.
 
 7. Delete protection boundaries
 
    - If no learner status rows exist for a competency definition, hard delete is allowed and cascades through competency metadata tables.
-   - Once any related learner status exists (an ACTIVE or HISTORY row at any level), deletion of associated competency definition rows is blocked. Because the learner-status foreign keys carry no database-level constraint (Decision 6), this protection is enforced in application code, not by a database cascade or constraint.
-   - This delete protection applies to ``oel_tagging_taxonomy``, ``CompetencyTaxonomy``, ``oel_tagging_tag``, ``oel_tagging_objecttag``, ``CompetencyCriteriaGroup``, ``CompetencyCriteria``, and ``CompetencyRuleProfile``.
+   - Once any related learner status exists in ``StudentCompetencyStatus``, ``StudentCompetencyCriteriaGroupStatus``, or ``StudentCompetencyCriteriaStatus``, deletion of associated competency definition rows is blocked.
+   - This delete protection applies to ``oel_tagging_taxonomy``, ``CompetencyTaxonomy``, ``oel_tagging_tag``, ``oel_tagging_objecttag``, ``CompetencyCriteriaGroup``, and ``CompetencyCriteria``.
    - Once any related learner status exists, retiring definitions may be archive-only (hidden from authoring and new associations), not hard delete.
+   - Exception: ``CompetencyRuleProfile`` is never hard-deleted, even before any learner status exists, because it is shared across many ``CompetencyCriterion`` rows and reused going forward rather than tied to one. Retirement is always archive-only, via its ``archived`` column (Decision 3).
 
 .. image:: images/CompetencyCriteriaModel.png
    :alt: Competency Criteria Model
    :width: 80%
    :align: center
-
-.. note::
-
-   The PNG above is the original overview and is now out of date. It is not regenerated here; apply
-   the following modifications when reading it. This decision is the source of truth wherever the two
-   differ.
-
-   1. Split each learner-status level into two tables: an ACTIVE table (one current row per learner
-      and node, updated in place) and an append-only HISTORY table (one row per genuine status
-      advance). The PNG draws a single table per level, so add
-      ``StudentCompetencyCriteriaStatusHistory``, ``StudentCompetencyCriteriaGroupStatusHistory``,
-      and ``StudentCompetencyStatusHistory``.
-   2. Remove the ``mastery_level_id`` column from ``StudentCompetencyCriteriaStatus``; mastery level
-      is a future rule type and is not part of this decision.
-   3. Add an ``effective_source_timestamp`` column to all six status tables (ACTIVE and HISTORY).
-   4. Add a ``modified`` column to the three ACTIVE tables only; the HISTORY tables keep ``created``
-      alone, since they are append-only and never updated after insert.
-   5. Make each status table's ``id`` a 64-bit ``BigAutoField``, and treat its ``user_id`` and node
-      references as logical foreign keys with no database-level constraint.
 
 
 Example
@@ -322,7 +331,7 @@ Content objects:
 
 2. ``CompetencyRuleProfile``:
 
-   - Course-scoped default: ``Grade >= 75%`` for this competency taxonomy
+   - Taxonomy-scoped default: ``Grade >= 75%`` for this competency taxonomy
 
 3. ``CompetencyCriteriaGroup``:
 
@@ -391,3 +400,25 @@ Rejected Alternatives
    2. Cons
 
       1. Increases table count and join complexity as new rule types are added
+
+5. Require a strict, always-cascading scope on ``CompetencyRuleProfile`` (organization always set; taxonomy only settable alongside organization; course only settable alongside both), instead of letting each row be scoped by at most one of the three independently.
+
+   1. Pros
+
+      1. At most one profile can ever apply to a given criterion by construction, without a separate uniqueness constraint or tiebreak field.
+   2. Cons
+
+      1. Does not fit taxonomies that span multiple organizations: a single taxonomy-wide default would need one duplicate profile per associated organization.
+      2. Requires reconciling profiles whenever an organization is added to or removed from a taxonomy.
+      3. Organization and taxonomy are not naturally nested (a taxonomy can belong to many organizations and vice versa), so forcing one to always contain the other does not reflect the actual relationship between them.
+
+6. Enforce ``CompetencyRuleProfile`` scope uniqueness with per-scope conditional/partial unique constraints (Django ``UniqueConstraint(condition=Q(...))``) directly on the three nullable scope columns, instead of a generated ``scope_code`` column (Decision 3).
+
+   1. Pros
+
+      1. No new column; the constraint reads directly off the existing scope columns.
+      2. The commonly-recommended Django pattern for "unique except when null" scoping.
+   2. Cons
+
+      1. Silently does not work on this project's tested and production database backend. Django compiles a conditional ``UniqueConstraint`` to a partial index, which MySQL does not support; Django raises only a non-fatal system-check warning (``models.W036``) and skips creating the constraint, leaving the uniqueness rule completely unenforced at the database level.
+      2. The gap would surface only as a data-integrity incident under concurrent writes, not as a test or migration failure, since SQLite (used for quick local test runs) does support partial indexes and would mask the problem in that environment.
