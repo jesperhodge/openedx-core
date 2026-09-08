@@ -54,10 +54,8 @@ INSTALLED_APPS = [
     "organizations",
     # django-rules based authorization
     'rules.apps.AutodiscoverRulesConfig',
-    # django-simple-history: registers its template tag libraries and admin integration
-    # (SimpleHistoryAdmin) and its management commands (populate_history, clean_old_history,
-    # clean_duplicate_history). HistoricalRecords() works without this app installed, but nothing
-    # else it provides does, and the package ships no AppConfig or system check to warn you.
+    # Required for django-simple-history's admin integration and management commands;
+    # HistoricalRecords() alone does not need it.
     "simple_history",
     # Our own apps
     "openedx_tagging",
