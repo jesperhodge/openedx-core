@@ -135,8 +135,8 @@ def test_deleting_a_taxonomy_with_a_scoped_rule_profile_also_deletes_the_profile
 ) -> None:
     """
     Deleting a CompetencyTaxonomy cascades to any CompetencyRuleProfile scoped to it via
-    `competency_taxonomy`: the delete succeeds and the profile row is gone too, matching #641's
-    AC25. A CompetencyRuleProfile is never hard-deleted by a *direct* delete of the profile itself
+    `competency_taxonomy`: the delete succeeds and the profile row is gone too, as #641
+    requires. A CompetencyRuleProfile is never hard-deleted by a *direct* delete of the profile itself
     (ADR-0002 Decision 7); that does not stop it being cascaded away as a side effect of deleting
     the taxonomy it is scoped to, once nothing else protects it. Nothing changes behaviorally in
     this MVP, since only the all-null system-default profile exists otherwise, so this scenario
@@ -265,10 +265,9 @@ def test_taxonomy_delete_cascades_its_scoped_profile_under_mysql_collector_seman
     Deleting a CompetencyTaxonomy with a taxonomy-scoped profile succeeds and cascades the profile
     away even under MySQL's non-deferred constraint semantics, the same as it does under ordinary
     SQLite semantics (see test_deleting_a_taxonomy_with_a_scoped_rule_profile_also_deletes_the_
-    profile above). Confirms the fix described in this section's header actually holds under the
-    collector path that used to trigger the bug: nulling the profile's `competency_taxonomy_id`
-    before deleting it does not touch `scope_code`, which would otherwise collide with the seeded
-    system-default profile's identical blank scope and raise IntegrityError instead of completing.
+    profile above). Nulling the profile's `competency_taxonomy_id` before deleting it leaves
+    `scope_code` alone, so it cannot collide with the seeded system-default profile's identical
+    blank scope and raise IntegrityError instead of completing the cascade.
     """
     monkeypatch.setattr(type(connection.features), "can_defer_constraint_checks", False, raising=False)
     profile = CompetencyRuleProfile.objects.create(
