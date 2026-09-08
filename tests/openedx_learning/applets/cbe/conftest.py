@@ -1,10 +1,4 @@
-"""
-Shared fixtures for the CBE criteria test modules (schema, deletion, and tree-integration tests).
-
-Every fixture here used to be duplicated verbatim across test_criteria_models.py and
-test_criteria_deletion.py. Consolidated here so both files, plus test_criteria_trees.py, share one
-definition.
-"""
+"""Shared fixtures for the CBE criteria test modules: schema, deletion, and tree-integration tests."""
 import pytest
 from organizations.api import ensure_organization
 from organizations.models import Organization

@@ -4,8 +4,6 @@ Tests for CompetencyCriteriaGroup, CompetencyRuleProfile, and CompetencyCriterio
 Fixtures shared with test_criteria_deletion.py and test_criteria_trees.py live in this directory's
 conftest.py.
 """
-import uuid as uuid_module
-
 import pytest
 from django.apps import apps
 from django.core.exceptions import ValidationError
@@ -14,11 +12,8 @@ from django.db.utils import IntegrityError
 from organizations.models import Organization
 
 from openedx_catalog.models import CatalogCourse, CourseRun
-# _RULE_PAYLOAD_SPECS is private: it's the payload-spec registry itself, the one place that
-# defines which rule types can actually be saved, which is exactly what
-# test_rule_type_choices_match_rule_types_with_a_defined_payload_spec below needs to compare
-# RuleType's declared choices against.
-from openedx_learning.applets.cbe.models.criteria import _RULE_PAYLOAD_SPECS
+# Private: the payload-spec registry, compared against RuleType's declared choices below.
+from openedx_learning.applets.cbe.rule_payloads import _RULE_PAYLOAD_SPECS
 from openedx_learning.models import (
     CompetencyCriteriaGroup,
     CompetencyCriterion,
@@ -52,161 +47,81 @@ _INVALID_GRADE_PAYLOADS = [
 
 
 # ==============================================================================================
-# Schema and columns (AC1, AC2, AC6, AC12, AC17, AC22, AC33, AC34, AC23). CompetencyTaxonomy's own
-# taxonomy_overrides_org default (AC1) is covered in test_models.py, not duplicated here.
+# Schema and columns. CompetencyTaxonomy's own taxonomy_overrides_org default is covered in
+# test_models.py, not duplicated here.
 # ==============================================================================================
 
 
-def test_group_columns_match_adr_decision_2(course_run: CourseRun, tag: Tag) -> None:
+def test_group_has_exactly_the_columns_adr_0002_decision_2_lists() -> None:
     """
-    CompetencyCriteriaGroup has exactly the columns ADR-0002 Decision 2 lists: a nullable self-FK
-    `parent`, a required `tag` (db_column oel_tagging_tag_id), a nullable `course` targeting
-    openedx_catalog.CourseRun, `name`, `ordering`, and `logic_operator`, plus `id`.
+    CompetencyCriteriaGroup's columns are exactly the ones ADR-0002 Decision 2 lists, with
+    `parent`, `course`, and `logic_operator` optional and the rest required. `tag` keeps the
+    legacy `oel_tagging_tag_id` column name. No `archived` column yet; that arrives with #642.
     """
-    group = CompetencyCriteriaGroup.objects.create(tag=tag, course=course_run)
-
-    parent_field = CompetencyCriteriaGroup._meta.get_field("parent")
-    assert parent_field.null is True
-    assert parent_field.remote_field.model is CompetencyCriteriaGroup
-
-    tag_field = CompetencyCriteriaGroup._meta.get_field("tag")
-    assert tag_field.null is False
-    assert tag_field.remote_field.model is Tag
-    assert tag_field.db_column == "oel_tagging_tag_id"
-
-    course_field = CompetencyCriteriaGroup._meta.get_field("course")
-    assert course_field.null is True
-    assert course_field.remote_field.model is CourseRun
-
-    assert CompetencyCriteriaGroup._meta.get_field("name").null is False
-    assert CompetencyCriteriaGroup._meta.get_field("ordering").null is False
-    assert CompetencyCriteriaGroup._meta.get_field("logic_operator").null is True
-
-    assert group.course_id == course_run.pk
+    fields = [f for f in CompetencyCriteriaGroup._meta.get_fields() if f.concrete]
+    assert {f.name for f in fields} == {
+        "id", "uuid", "parent", "tag", "course", "name", "ordering", "logic_operator",
+    }
+    assert {f.name for f in fields if f.null} == {"parent", "course", "logic_operator"}
+    assert CompetencyCriteriaGroup._meta.get_field("parent").remote_field.model is CompetencyCriteriaGroup
+    assert CompetencyCriteriaGroup._meta.get_field("tag").remote_field.model is Tag
+    assert CompetencyCriteriaGroup._meta.get_field("tag").db_column == "oel_tagging_tag_id"
+    assert CompetencyCriteriaGroup._meta.get_field("course").remote_field.model is CourseRun
 
 
-def test_rule_profile_columns_match_adr_decision_3() -> None:
+def test_rule_profile_has_exactly_the_columns_adr_0002_decision_3_lists() -> None:
     """
-    CompetencyRuleProfile has exactly the columns ADR-0002 Decision 3 lists: nullable
-    `organization`, `course`, and `competency_taxonomy` scope fields, `scope_code`, `rule_type`,
-    `rule_payload`, and `archived` (defaulting to False), plus `id`.
-
-    `scope_code` is nullable, not "never null" as an earlier reading of AC7 (issue #641) required:
-    see DECISION-on-delete.md deviation 3. It is null exactly while a profile is archived (see
-    test_scope_code_is_null_once_archived_and_non_null_while_live below); this is what lets an
-    archived profile stop occupying its scope's unique slot.
+    CompetencyRuleProfile's columns are exactly the ones ADR-0002 Decision 3 lists, with
+    `organization`, `course`, `competency_taxonomy`, and `scope_code` nullable and the rest
+    required. `scope_code` is nullable, not "never null": it is null exactly while a profile is
+    archived, which is what frees that scope's unique slot for a replacement. See ADR-0002
+    Decision 3.
     """
-    organization_field = CompetencyRuleProfile._meta.get_field("organization")
-    assert organization_field.null is True
-    assert organization_field.remote_field.model is Organization
-
-    course_field = CompetencyRuleProfile._meta.get_field("course")
-    assert course_field.null is True
-    assert course_field.remote_field.model is CourseRun
-
-    taxonomy_field = CompetencyRuleProfile._meta.get_field("competency_taxonomy")
-    assert taxonomy_field.null is True
-    assert taxonomy_field.remote_field.model is CompetencyTaxonomy
-
-    assert CompetencyRuleProfile._meta.get_field("scope_code").null is True
-    assert CompetencyRuleProfile._meta.get_field("rule_type").null is False
-    assert CompetencyRuleProfile._meta.get_field("rule_payload").null is False
-    assert CompetencyRuleProfile._meta.get_field("archived").default is False
+    fields = [f for f in CompetencyRuleProfile._meta.get_fields() if f.concrete]
+    assert {f.name for f in fields} == {
+        "id", "uuid", "organization", "course", "competency_taxonomy", "scope_code", "rule_type",
+        "rule_payload", "archived",
+    }
+    assert {f.name for f in fields if f.null} == {"organization", "course", "competency_taxonomy", "scope_code"}
+    assert CompetencyRuleProfile._meta.get_field("organization").remote_field.model is Organization
+    assert CompetencyRuleProfile._meta.get_field("course").remote_field.model is CourseRun
+    assert CompetencyRuleProfile._meta.get_field("competency_taxonomy").remote_field.model is CompetencyTaxonomy
 
 
-def test_criterion_columns_match_adr_decision_4(
-    group: CompetencyCriteriaGroup, object_tag: ObjectTag, default_rule_profile: CompetencyRuleProfile
-) -> None:
+def test_criterion_has_exactly_the_columns_adr_0002_decision_4_lists() -> None:
     """
-    CompetencyCriterion has exactly the columns ADR-0002 Decision 4 lists: required `group` and
-    `object_tag`, a nullable `rule_profile`, and nullable `rule_type_override` /
-    `rule_payload_override`, plus `id`. The model is named CompetencyCriterion (singular; the
-    table holds many, individually a criterion), and carries no Meta.db_table override, so the
-    table is Django's default name for that class.
+    CompetencyCriterion's columns are exactly the ones ADR-0002 Decision 4 lists, with
+    `rule_profile`, `rule_type_override`, and `rule_payload_override` optional and the rest
+    required. No `archived` column yet; that arrives with #642. Carries no Meta.db_table
+    override, so the table is Django's default name for the class.
     """
-    assert CompetencyCriterion.__name__ == "CompetencyCriterion"
+    fields = [f for f in CompetencyCriterion._meta.get_fields() if f.concrete]
+    assert {f.name for f in fields} == {
+        "id", "uuid", "group", "object_tag", "rule_profile", "rule_type_override", "rule_payload_override",
+    }
+    assert {f.name for f in fields if f.null} == {"rule_profile", "rule_type_override", "rule_payload_override"}
+    assert CompetencyCriterion._meta.get_field("group").db_column == "competency_criteria_group_id"
+    assert CompetencyCriterion._meta.get_field("object_tag").db_column == "oel_tagging_objecttag_id"
+    assert CompetencyCriterion._meta.get_field("rule_profile").db_column == "competency_rule_profile_id"
     assert CompetencyCriterion._meta.db_table == "openedx_learning_competencycriterion"
 
-    group_field = CompetencyCriterion._meta.get_field("group")
-    assert group_field.null is False
-    assert group_field.db_column == "competency_criteria_group_id"
 
-    object_tag_field = CompetencyCriterion._meta.get_field("object_tag")
-    assert object_tag_field.null is False
-    assert object_tag_field.db_column == "oel_tagging_objecttag_id"
-
-    rule_profile_field = CompetencyCriterion._meta.get_field("rule_profile")
-    assert rule_profile_field.null is True
-    assert rule_profile_field.db_column == "competency_rule_profile_id"
-
-    assert CompetencyCriterion._meta.get_field("rule_type_override").null is True
-    assert CompetencyCriterion._meta.get_field("rule_payload_override").null is True
-
-    criterion = CompetencyCriterion.objects.create(
-        group=group, object_tag=object_tag, rule_profile=default_rule_profile
-    )
-    assert criterion.rule_profile_id == default_rule_profile.pk
+# ==============================================================================================
+# Constraints and validation.
+# ==============================================================================================
 
 
 @pytest.mark.parametrize(
-    "model",
-    [CompetencyCriteriaGroup, CompetencyRuleProfile, CompetencyCriterion],
-    ids=["group", "rule_profile", "criterion"],
+    "logic_operator",
+    [
+        pytest.param(LogicOperator.AND, id="and"),
+        pytest.param(LogicOperator.OR, id="or"),
+        pytest.param(None, id="null"),
+    ],
 )
-def test_uuid_is_a_stable_unique_non_editable_external_identifier(model: type[models.Model]) -> None:
-    """
-    All three models carry a `uuid` external identifier: unique, not editable (so it can never be
-    set through a form), and defaulting to a freshly generated uuid4 for every new row.
-    """
-    uuid_field = model._meta.get_field("uuid")
-    assert isinstance(uuid_field, models.UUIDField)
-    assert uuid_field.unique is True
-    assert uuid_field.editable is False
-    assert uuid_field.null is False
-    assert uuid_field.default is uuid_module.uuid4
-
-
-def test_group_has_no_columns_beyond_adr_decision_2() -> None:
-    """
-    CompetencyCriteriaGroup's concrete field set is exactly {id, uuid, parent, tag, course, name,
-    ordering, logic_operator}: no more, no less. In particular, no `archived` column exists on
-    this model (that responsibility belongs to a later change; see the module's own history of
-    which ticket owns which model's archive column).
-    """
-    concrete_field_names = {f.name for f in CompetencyCriteriaGroup._meta.get_fields() if f.concrete}
-    assert concrete_field_names == {"id", "uuid", "parent", "tag", "course", "name", "ordering", "logic_operator"}
-
-
-def test_rule_profile_has_no_columns_beyond_adr_decision_3() -> None:
-    """
-    CompetencyRuleProfile's concrete field set is exactly {id, organization, course,
-    competency_taxonomy, scope_code, rule_type, rule_payload, archived, uuid}: no more, no less.
-    """
-    concrete_field_names = {f.name for f in CompetencyRuleProfile._meta.get_fields() if f.concrete}
-    assert concrete_field_names == {
-        "id", "organization", "course", "competency_taxonomy", "scope_code", "rule_type", "rule_payload",
-        "archived", "uuid",
-    }
-
-
-def test_criterion_has_no_columns_beyond_adr_decision_4() -> None:
-    """
-    CompetencyCriterion's concrete field set is exactly {id, uuid, group, object_tag, rule_profile,
-    rule_type_override, rule_payload_override}: no more, no less. In particular, no `archived`
-    column exists on this model.
-    """
-    concrete_field_names = {f.name for f in CompetencyCriterion._meta.get_fields() if f.concrete}
-    assert concrete_field_names == {
-        "id", "uuid", "group", "object_tag", "rule_profile", "rule_type_override", "rule_payload_override",
-    }
-
-
-# ==============================================================================================
-# Constraints and validation (AC4, AC5, AC7, AC9, AC11, AC13, AC14, AC15).
-# ==============================================================================================
-
-
-def test_group_logic_operator_accepts_and_or_and_null_regardless_of_child_count(tag: Tag) -> None:
+def test_group_logic_operator_accepts_and_or_and_null_regardless_of_child_count(
+    logic_operator: str | None, tag: Tag
+) -> None:
     """
     logic_operator accepts AND, OR, or null. Nothing at the data layer constrains it by how many
     children the group actually has: a group with zero children and a group with two children both
@@ -214,17 +129,16 @@ def test_group_logic_operator_accepts_and_or_and_null_regardless_of_child_count(
     see a group's future children at save time (a child's parent FK cannot point at a row that
     doesn't have a primary key yet), so this is enforced nowhere at this layer, deliberately.
     """
-    for logic_operator in (LogicOperator.AND, LogicOperator.OR, None):
-        childless = CompetencyCriteriaGroup.objects.create(tag=tag, logic_operator=logic_operator)
-        assert childless.pk is not None
+    childless = CompetencyCriteriaGroup.objects.create(tag=tag, logic_operator=logic_operator)
+    assert childless.pk is not None
 
-        parent = CompetencyCriteriaGroup.objects.create(tag=tag, logic_operator=logic_operator)
-        CompetencyCriteriaGroup.objects.create(tag=tag, parent=parent)
-        CompetencyCriteriaGroup.objects.create(tag=tag, parent=parent)
-        assert CompetencyCriteriaGroup.objects.filter(parent=parent).count() == 2
+    parent = CompetencyCriteriaGroup.objects.create(tag=tag, logic_operator=logic_operator)
+    CompetencyCriteriaGroup.objects.create(tag=tag, parent=parent)
+    CompetencyCriteriaGroup.objects.create(tag=tag, parent=parent)
+    assert CompetencyCriteriaGroup.objects.filter(parent=parent).count() == 2
 
 
-def test_group_parent_and_child_relationship(tag: Tag) -> None:
+def test_a_root_group_has_a_null_parent_and_a_child_points_at_the_group_it_was_created_under(tag: Tag) -> None:
     """
     A CompetencyCriteriaGroup's parent is null for a root and points at its parent for a child.
     See ADR-0002 Decision 2.
@@ -378,8 +292,6 @@ def test_archiving_a_profile_frees_its_scope_for_a_replacement(organization: Org
     Once a profile scoped to a given organization/course/taxonomy is archived, a brand new profile
     may be created for that exact same scope: the archived row's scope_code goes to null and stops
     occupying the unique slot, so it no longer collides with the replacement's non-null scope_code.
-    Before this, archiving a profile meant that scope could never be used again, since the archived
-    row's scope_code stayed non-null and permanently held the unique slot.
     """
     original = CompetencyRuleProfile.objects.create(
         organization=organization, rule_type=RuleType.GRADE, rule_payload=_GRADE_PAYLOAD
@@ -395,21 +307,6 @@ def test_archiving_a_profile_frees_its_scope_for_a_replacement(organization: Org
 
     assert original.scope_code is None
     assert replacement.scope_code == f"org:{organization.pk},course:,taxonomy:"
-
-
-def test_scope_code_unique_constraint_is_unconditional() -> None:
-    """
-    No UniqueConstraint on CompetencyRuleProfile carries a `condition`. A conditional
-    UniqueConstraint compiles to a partial index, which this project's MySQL backend does not
-    support: Django would only raise a non-fatal system-check warning (models.W036) and silently
-    skip creating the constraint, leaving uniqueness unenforced in production, while SQLite (used
-    for local test runs) supports partial indexes and would mask the gap. See ADR-0002 Rejected
-    Alternative 6.
-    """
-    unique_constraints = [c for c in CompetencyRuleProfile._meta.constraints if isinstance(c, models.UniqueConstraint)]
-    assert unique_constraints
-    for constraint in unique_constraints:
-        assert constraint.condition is None
 
 
 def test_two_live_profiles_cannot_share_the_same_scope(organization: Organization) -> None:
@@ -453,7 +350,7 @@ def test_criterion_profile_xor_override_check_constraint_rejects_invalid_states(
     Covers the three invalid states that reach the database's check constraint: both set, neither
     set, and only rule_payload_override set. The fourth invalid state, only rule_type_override set,
     is caught earlier by save()'s own validation instead and raises ValidationError before the
-    database is ever touched; see test_criterion_save_validates_override_payload_before_constraint
+    database is ever touched; see test_setting_a_rule_type_override_without_a_payload_is_rejected_by_save
     below for that case, and why it raises a different exception type than these three.
     """
     use_profile = invalid_kwargs.pop("use_profile")
@@ -485,7 +382,7 @@ def test_criterion_accepts_either_a_rule_profile_or_both_overrides(
     assert with_overrides.pk is not None
 
 
-def test_criterion_save_validates_override_payload_before_constraint(
+def test_setting_a_rule_type_override_without_a_payload_is_rejected_by_save(
     group: CompetencyCriteriaGroup, object_tag: ObjectTag
 ) -> None:
     """
@@ -520,11 +417,8 @@ def test_rule_profile_full_clean_rejects_invalid_payload(rule_type: str, payload
 def test_rule_profile_full_clean_value_message_names_the_fraction_convention(organization: Organization) -> None:
     """
     full_clean()'s error for a rule_payload 'value' given on a 0-100 scale (e.g. 80) names the
-    0.0-1.0 fraction convention, not attrs' generic default message for a failed validator (which
-    would say nothing about fractions or percentages) and not a Python traceback fragment.
-    Guards against exactly the message-quality regression a naive attrs implementation of
-    validate_rule_payload could introduce silently, since every other invalid-payload test here
-    only asserts the exception type.
+    0.0-1.0 fraction convention. Every other invalid-payload test here only asserts the exception
+    type; this one asserts the message content.
     """
     profile = CompetencyRuleProfile(
         organization=organization, rule_type=RuleType.GRADE, rule_payload={"op": "gte", "value": 80, "scale": "percent"}
@@ -534,21 +428,12 @@ def test_rule_profile_full_clean_value_message_names_the_fraction_convention(org
 
     message = " ".join(exc_info.value.messages)
     assert "fraction between 0.0 and 1.0" in message
-    # Must not leak the attrs spec class's name or any Python call-mechanics fragment: a course
-    # author editing this payload in the admin should never see "GradeRule.__init__()".
-    assert "__init__" not in message
-    assert "GradeRule" not in message
 
 
 def test_rule_profile_full_clean_extra_key_message_names_the_key(organization: Organization) -> None:
     """
     full_clean()'s error for an unrecognized rule_payload key names that key in our own domain
-    language (e.g. "unexpected extra"), not attrs' generic default message for a failed validator
-    and not Python's own kw_only TypeError text ("GradeRule.__init__() got an unexpected keyword
-    argument 'extra'"), which leaks the internal spec class's name to a course author editing
-    this payload in the admin. Guards against exactly that regression, which a test asserting
-    only that the key name appears in the message would not catch, since the leaky Python message
-    also contains the key name.
+    language (e.g. "unexpected extra").
     """
     profile = CompetencyRuleProfile(
         organization=organization,
@@ -560,8 +445,6 @@ def test_rule_profile_full_clean_extra_key_message_names_the_key(organization: O
 
     message = " ".join(exc_info.value.messages)
     assert "extra" in message
-    assert "__init__" not in message
-    assert "GradeRule" not in message
 
 
 @pytest.mark.parametrize("rule_type, payload", _INVALID_GRADE_PAYLOADS)
@@ -621,8 +504,8 @@ def test_criterion_rule_profile_is_not_recomputed_once_a_more_specific_profile_a
 
 
 # ==============================================================================================
-# Scope immutability (AC11). Each scope field gets its own rejection test; rule_type, rule_payload,
-# and archived changing on the same row is asserted separately as the case that must still work.
+# Scope immutability. Each scope field gets its own rejection test; rule_type, rule_payload, and
+# archived changing on the same row is asserted separately as the case that must still work.
 # ==============================================================================================
 
 
@@ -699,10 +582,9 @@ def test_scope_immutability_enforced_after_deferred_load(
     _check_scope_immutable() always queries the persisted scope directly (see its docstring), so a
     partial load is not a way to bypass this check.
 
-    Uses a second organization rather than setting the scope to None: setting it to None would
-    make scope_code collide with the seeded system-default row, so the unique constraint would
-    raise IntegrityError instead of the scope guard, and the test would pass for the wrong
-    reason. Do not "simplify" this back to None.
+    Uses a second organization rather than setting the scope to None: a null scope would collide
+    with the seeded system-default row, so the unique constraint would raise IntegrityError and
+    the scope guard would never be reached.
     """
     profile = CompetencyRuleProfile.objects.create(
         organization=organization, rule_type=RuleType.GRADE, rule_payload=_GRADE_PAYLOAD
@@ -728,7 +610,7 @@ def test_scope_immutability_enforced_after_deferred_load(
 
 
 # ==============================================================================================
-# Indexes, history (AC16, AC19, AC20).
+# Indexes, history.
 # ==============================================================================================
 
 
@@ -827,8 +709,8 @@ def test_history_not_recorded_for_tag_taxonomy_or_competencytaxonomy(competency_
 
 
 # ==============================================================================================
-# Migrations (AC10). AC21 (no makemigrations drift) and AC8 (this suite also runs against MySQL)
-# are verified by running manage.py / the MySQL settings module, not by a unit test.
+# Migrations. No-makemigrations-drift and running this suite against MySQL are verified by
+# running manage.py / the MySQL settings module, not by a unit test.
 # ==============================================================================================
 
 

@@ -1,27 +1,9 @@
 """
 Delete-behavior tests for CompetencyCriteriaGroup, CompetencyRuleProfile, and CompetencyCriterion.
 
-Two of the nine foreign keys here assert a different on_delete value than issue #641 itself
-specifies, because on_delete expresses containment (is this row meaningless once its referent is
-gone?), never a protection policy:
-
-- CompetencyCriteriaGroup.course must be CASCADE, not PROTECT: a course-scoped criteria tree is
-  meaningless once its course run is gone. PROTECT would make a course run permanently
-  undeletable the moment any competency criteria exist for it, even with zero learner data, which
-  is a different (and stricter) guarantee than anything #641 actually needs.
-- CompetencyRuleProfile.course must be CASCADE, not PROTECT, for the same reason, and because a
-  taxonomy or course is only ever hard-deleted once nothing beneath it needs protecting (see
-  ADR-0002 Decision 7's amended text): a course-scoped profile is safe to remove along with its
-  course rather than blocking the delete.
-
-CompetencyRuleProfile.competency_taxonomy is also CASCADE, matching #641's own AC25. A
-CompetencyRuleProfile's own "never hard-deleted" rule (Decision 7) governs a *direct* delete of a
-profile; it does not stop a profile from being cascaded away as a side effect of deleting the
-taxonomy or course it is scoped to, once nothing else protects it. When something else does
-protect it -- a CompetencyCriterion still assigned to it via the PROTECT'd `rule_profile` foreign
-key -- deleting the taxonomy or course still raises ProtectedError, exactly as it would for any
-other row a PROTECT relationship blocks; see the "residual tension" section below for the one
-case where that ProtectedError names the wrong object.
+See ADR-0002 Decision 7 for why each foreign key here is CASCADE or PROTECT, including the two
+that assert a different value than issue #641 itself specifies, and see the "residual tension"
+section below for the one case where a PROTECT raises naming the wrong object.
 
 Fixtures shared with test_criteria_models.py and test_criteria_trees.py live in this directory's
 conftest.py.
@@ -48,15 +30,9 @@ _GRADE_PAYLOAD = {"op": "gte", "value": 0.8, "scale": "percent"}
 
 
 # ==============================================================================================
-# One test per foreign key. The PROTECT ones assert ProtectedError and inspect `protected_objects`
-# to confirm which relationship actually fired: several protected relationships can fire on one
-# delete (see test_deleting_an_organization_with_a_scoped_profile_raises_protected_error_naming_
-# the_profile below for a real trap of that kind, where CatalogCourse.org is also PROTECT), so a
-# bare `pytest.raises(ProtectedError)` would not actually prove which foreign key did the
-# protecting. The CASCADE ones assert the delete succeeds and that the referencing row is actually
-# gone from the database afterward, not merely that no exception was raised, and assert the
-# referencing row existed beforehand, so the "gone" assertion can't pass because a fixture never
-# created it in the first place.
+# One test per foreign key. The PROTECT ones inspect `protected_objects`, since more than one
+# protected relationship can fire on one delete. The CASCADE ones assert the referencing row
+# existed before the delete and is gone after, not just that no exception was raised.
 # ==============================================================================================
 
 
@@ -234,21 +210,13 @@ def test_deleting_a_rule_profile_referenced_by_a_criterion_raises_protected_erro
 
 
 # ==============================================================================================
-# Residual tension (see DECISION-on-delete.md's REVISION section): with `competency_taxonomy`
-# CASCADE and `rule_profile` PROTECT, deleting a taxonomy whose scoped profile is itself assigned
-# to a criterion raises ProtectedError, because Django's collector looks up rows that reference the
-# profile in the database rather than in the set it has already decided to delete -- it fires even
-# though that same criterion would also be cascade-deleted in this same operation, via the separate
-# Tag -> CompetencyCriteriaGroup.tag -> CompetencyCriterion.group chain. Confirmed, accepted defect
-# for this MVP: no code path creates a taxonomy-scoped profile at all, so it cannot be reached with
-# real data. The fix, when scoped profiles are built, is a fifth reassignment event on ADR-0002
-# Decision 4 (which currently names four): "the profile's scope owner is being deleted" reassigns
-# every criterion off that profile in an application-layer function, before the cascade proceeds.
-# Not built in this change; #641 scopes it out.
+# Residual tension: see ADR-0002 Decision 7's "Known limitation" bullet for why deleting a
+# taxonomy whose scoped profile is assigned to a criterion raises ProtectedError naming that
+# criterion, even though the criterion would also be cascade-deleted in the same operation.
 # ==============================================================================================
 
 
-def test_taxonomy_delete_with_a_criterion_assigned_its_scoped_profile_raises_protected_error_naming_the_criterion(
+def test_taxonomy_delete_blocked_by_its_scoped_profile_names_the_criterion_not_the_profile(
     competency_taxonomy: CompetencyTaxonomy, group: CompetencyCriteriaGroup, object_tag: ObjectTag
 ) -> None:
     """
@@ -283,26 +251,10 @@ def test_taxonomy_delete_with_a_criterion_assigned_its_scoped_profile_raises_pro
 
 
 # ==============================================================================================
-# MySQL collector semantics, reproduced on SQLite by monkeypatching can_defer_constraint_checks.
-#
-# MySQL cannot defer foreign-key constraint checks (can_defer_constraint_checks is False there).
-# django.db.models.deletion.CASCADE reads that flag directly: whenever a cascading foreign key is
-# nullable and constraints can't be deferred, it nulls that column on every row about to be
-# cascade-deleted (via collector.add_field_update) BEFORE the actual DELETE, to avoid a transient
-# FK violation under non-deferred constraint checking. On ordinary SQLite semantics (deferred
-# constraints allowed), this nulling never happens at all, so a defect that only shows up via this
-# path is invisible on the fast local suite and only ever caught by the separate MySQL CI job
-# (AC8). Monkeypatching the flag reproduces it here instead. Do not "simplify" these tests by
-# dropping the monkeypatch: without it, neither scenario below reproduces anything, on either the
-# broken or the fixed code.
-#
-# This used to be where the shipped bug lived: when scope_code was a database GeneratedField, this
-# same pre-delete nulling of a profile's scope foreign key recomputed scope_code, colliding it with
-# whatever other row already held that now-blank scope (the seeded system-default row, or a second
-# profile nulled in the same batch) and raising IntegrityError instead of completing the cascade.
-# Making scope_code a plain column written only in save() (see models/criteria.py) fixes this: the
-# collector's nulling touches only the real scope foreign key column, never scope_code, so a
-# profile being cascade-deleted keeps its true scope_code, unseen by anyone, until the row is gone.
+# MySQL cannot defer foreign-key constraint checks, and Django's CASCADE handler reads that flag
+# directly: it nulls a nullable cascading foreign key before the DELETE. On SQLite that nulling
+# never happens, so the tests below monkeypatch the flag to reproduce it. Without the monkeypatch
+# they pass against broken and correct code alike, so do not drop it.
 # ==============================================================================================
 
 
@@ -398,20 +350,12 @@ def test_deleting_two_taxonomies_together_cascades_both_their_scoped_profiles_aw
 
 
 # ==============================================================================================
-# Transitive deletion tests required by #641's Deletions criteria: deleting an oel_tagging.Tag,
-# a CompetencyCriteriaGroup at depth, an oel_tagging.ObjectTag, or an oel_tagging.Taxonomy, when
-# no learner status exists beneath the target, must succeed and take the whole referencing
-# criteria tree with it.
-#
-# Each of these criteria also has a "raises ProtectedError when a learner status row exists
-# beneath it" half. That half is NOT covered here: it needs #642's Student*Status tables, which
-# do not exist on this branch, and #642's own criterion says those tests belong in the slice that
-# follows #641, once those tables exist. This file does not stub, mock, or fake a status model to
-# test them; their absence here is deliberate, not an oversight.
-#
-# See test_criteria_trees.py for the fuller integrative version of this shape: a wider tree with a
-# surviving sibling branch and a mix of profile-assigned and override criteria, asserting exactly
-# which rows survive rather than only that a cascade fired.
+# Transitive deletion tests: deleting an oel_tagging.Tag, a CompetencyCriteriaGroup at depth, an
+# oel_tagging.ObjectTag, or an oel_tagging.Taxonomy, with no learner status beneath the target,
+# must succeed and take the whole referencing criteria tree with it. The other half of each, a
+# ProtectedError once a learner status row exists beneath it, needs #642's Student*Status tables
+# and is deliberately not stubbed here. See test_criteria_trees.py for the fuller integrative
+# version, asserting exactly which rows survive rather than only that a cascade fired.
 # ==============================================================================================
 
 
