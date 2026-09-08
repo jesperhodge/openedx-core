@@ -44,7 +44,7 @@ class Migration(migrations.Migration):
             fields=[
                 ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
                 ('uuid', models.UUIDField(default=uuid.uuid4, editable=False, unique=True, verbose_name='UUID')),
-                ('scope_code', models.CharField(editable=False, help_text='Derived from organization/course/competency_taxonomy; null while archived, otherwise "org:X,course:Y,taxonomy:Z" with each segment blank when that scope column is null. Recomputed in save(); never set directly.', max_length=255, null=True)),
+                ('scope_code', models.CharField(editable=False, help_text='Derived from organization/course/competency_taxonomy; null while archived, otherwise "org:X,course:Y,taxonomy:Z" with each segment blank when that scope column is null.', max_length=255, null=True)),
                 ('rule_type', models.CharField(choices=[('Grade', 'Grade')], max_length=32)),
                 ('rule_payload', models.JSONField(help_text='Structured payload keyed by rule_type; see validate_rule_payload for the shape it must match.')),
                 ('archived', models.BooleanField(default=False, help_text="Set instead of deleting a profile that's no longer wanted. Archived profiles are hidden from authoring and new associations but remain queryable, so existing criteria stay resolvable.")),

@@ -1,44 +1,11 @@
 """
-Models for CompetencyAchievementCriteria: CompetencyCriteriaGroup, CompetencyRuleProfile, CompetencyCriterion.
+The CompetencyAchievementCriteria models: CompetencyCriteriaGroup, CompetencyRuleProfile, and
+CompetencyCriterion.
 
-See :ref:`openedx-learning-adr-0002` for the design this module implements, and
-:ref:`openedx-learning-adr-0003` for why these three models (and not CompetencyTaxonomy) carry
-``django-simple-history`` tracking.
-
-Seven of the nine foreign keys here are ``on_delete=models.CASCADE``: both ``CompetencyCriteriaGroup``
-tree links (``parent``, ``tag``), its ``course`` scope, both ``CompetencyCriterion`` links (``group``,
-``object_tag``), and ``CompetencyRuleProfile``'s ``course`` and ``competency_taxonomy`` scope links.
-The other two stay ``models.PROTECT``: ``CompetencyCriterion.rule_profile`` and
-``CompetencyRuleProfile.organization``.
-
-CASCADE expresses containment: a row on the CASCADE side is meaningless once its referent is gone,
-so its own delete has no separate policy to enforce. The tree links (``parent``, ``tag``, ``group``,
-``object_tag``) also have to be CASCADE for a mechanical reason: Django's collector looks up
-referencing rows in the database rather than in the set it has already decided to delete, so even a
-parent and child reached in the same batch would trip PROTECT and abort the walk partway down. Those
-same CASCADE edges are what carries the collector down to the PROTECT that actually enforces
-ADR-0002 Decision 7 for learner data: #642's three ``Student*Status`` foreign keys, one and two
-levels below the tag, are reached only by walking these edges, never relaxed by them.
-
-``CompetencyRuleProfile.course`` and ``.competency_taxonomy`` are CASCADE for an ADR-level reason,
-not a mechanical one: Decision 7 (as amended) says a taxonomy or course is only ever hard-deleted
-once nothing beneath it needs protecting, so a profile scoped to it is safe to remove at the same
-time rather than blocking that delete. ``.organization`` stays PROTECT because an ``Organization``
-is not a competency-definition record covered by that reasoning, and ``edx-organizations``
-deactivates orgs rather than deleting them.
-
-``rule_profile`` staying PROTECT is Decision 7's actual backstop for a profile itself: a
-CompetencyRuleProfile is never hard-deleted by a *direct* delete (retirement is archive-only), and
-this is what makes that hold at the ORM layer, by blocking any attempt to delete one out from under
-a criterion still assigned to it.
-
-One non-obvious consequence of the collector's database-not-pending-set lookup described above:
-deleting a CompetencyTaxonomy whose taxonomy-scoped profile is itself assigned to a
-CompetencyCriterion raises ProtectedError naming that criterion, even though the criterion would
-also be cascade-deleted in the same operation through the tag chain. See
-test_criteria_deletion.py's "residual tension" section for what this needs before it can be fixed
-(a fifth ADR-0002 Decision 4 reassignment event), and why it cannot be reached with this phase's
-data.
+See :ref:`openedx-learning-adr-0002` for the design, including Decision 7 for why each foreign
+key here is CASCADE or PROTECT and for the one known case where a taxonomy delete reports the
+wrong blocking object. See :ref:`openedx-learning-adr-0003` Decisions 1 and 2 for why these
+three models carry ``django-simple-history`` tracking and CompetencyTaxonomy does not.
 """
 from __future__ import annotations
 
@@ -53,7 +20,7 @@ from openedx_catalog.models import CourseRun
 from openedx_django_lib.fields import case_insensitive_char_field, immutable_uuid_field
 from openedx_tagging.models import ObjectTag, Tag
 
-from ..rule_payloads import _RULE_PAYLOAD_SPECS, RuleType, validate_rule_payload
+from ..rule_payloads import RuleType, validate_rule_payload
 from .competency_taxonomy import CompetencyTaxonomy
 
 __all__ = [
@@ -61,14 +28,7 @@ __all__ = [
     "CompetencyCriterion",
     "CompetencyRuleProfile",
     "LogicOperator",
-    "RuleType",
-    "validate_rule_payload",
 ]
-
-# The declared choices for both rule_type fields below, derived from the payload-spec registry
-# (see rule_payloads.py) rather than hand-listed, so a rule type can never be offered as a choice
-# without also having a payload spec that makes it actually saveable.
-_RULE_TYPE_CHOICES = [(rule_type, RuleType(rule_type).label) for rule_type in _RULE_PAYLOAD_SPECS]
 
 
 class LogicOperator(models.TextChoices):
@@ -148,14 +108,9 @@ class CompetencyCriteriaGroup(models.Model):
             # indexes every ForeignKey column by default, so a second explicit one here would only
             # cost write throughput without adding any read benefit.
         ]
-        # ADR-0002 Decision 2 explicitly excludes two constraints here, both for the same reason:
-        # a child group cannot be saved until its parent's primary key exists, so at the moment a
-        # parent group is being validated/saved, its clean() always sees zero children, whether or
-        # not more are about to be attached. There's no single-row state at save time to check either
-        # of these against:
-        # - A constraint tying `logic_operator` to child count.
-        # - A UniqueConstraint on (parent, ordering), which would need to see all siblings, not just
-        #   the row being saved.
+        # No constraint tying `logic_operator` to child count, and no UniqueConstraint on (parent,
+        # ordering): a child group cannot be saved until its parent's primary key exists, so
+        # neither has a single-row state to check at save time. See ADR-0002 Decision 2.
 
 
 class CompetencyRuleProfile(models.Model):
@@ -210,31 +165,19 @@ class CompetencyRuleProfile(models.Model):
         related_name="rule_profiles",
         help_text=_("The competency taxonomy this profile is scoped to, if any."),
     )
-    # A plain column, written explicitly in save() below, NOT a database GeneratedField: null
-    # while archived, and the "org:X,course:Y,taxonomy:Z" string (see save()) while live. This is
-    # what lets the UniqueConstraint below stay a plain, unconditional one on every backend this
-    # project supports, including MySQL, which does not support the conditional/partial unique
-    # indexes that a naive "unique unless archived" rule would otherwise need (see ADR-0002
-    # Rejected Alternative 6): SQL never treats two NULLs as equal, so any number of archived rows
-    # may share a scope while exactly one live row holds it. A plain column also can't be rewritten
-    # by Django's collector, unlike a GeneratedField: deleting a scope owner (a CompetencyTaxonomy
-    # or CourseRun) whose foreign key here is nullable and CASCADE nulls that one column on this
-    # row before deleting it, on any backend that can't defer constraint checks (MySQL); a
-    # GeneratedField would recompute from that nulled value and could collide with another row
-    # already occupying the resulting blank scope, raising IntegrityError instead of completing
-    # the cascade. A plain column is untouched by that nulling, so this row keeps its true
-    # scope_code, unseen by anyone, until the row itself is deleted.
+    # Recomputed in save(), never set directly: null while archived, so any number of archived
+    # rows may share a scope while exactly one live row holds it. Deliberately a plain column
+    # rather than a GeneratedField. See ADR-0002 Decision 3.
     scope_code = models.CharField(
         max_length=255,
         null=True,
         editable=False,
         help_text=_(
             "Derived from organization/course/competency_taxonomy; null while archived, otherwise "
-            "\"org:X,course:Y,taxonomy:Z\" with each segment blank when that scope column is null. "
-            "Recomputed in save(); never set directly."
+            "\"org:X,course:Y,taxonomy:Z\" with each segment blank when that scope column is null."
         ),
     )
-    rule_type = models.CharField(max_length=32, choices=_RULE_TYPE_CHOICES)
+    rule_type = models.CharField(max_length=32, choices=RuleType)
     rule_payload = models.JSONField(
         help_text=_("Structured payload keyed by rule_type; see validate_rule_payload for the shape it must match.")
     )
@@ -254,14 +197,9 @@ class CompetencyRuleProfile(models.Model):
 
     class Meta:
         constraints = [
-            # A plain, unconditional UniqueConstraint, deliberately: scope_code is a plain,
-            # always-non-null-while-live column (see its definition above), not a conditional
-            # index over the raw nullable scope columns. MySQL (this project's tested and
-            # production database) does not support conditional/partial unique indexes -- Django
-            # only raises a non-fatal system-check warning (models.W036) and silently skips
-            # creating such a constraint there, while SQLite (used for quick local test runs)
-            # does support them and would mask the gap in that environment. See ADR-0002 Rejected
-            # Alternative 6.
+            # Unconditional, over the derived scope_code column rather than the raw nullable
+            # scope columns: MySQL has no partial unique indexes and Django silently skips
+            # creating one there. See ADR-0002 Rejected Alternative 6.
             models.UniqueConstraint(fields=["scope_code"], name="oel_cbe_ruleprofile_scope_code_uniq"),
             models.CheckConstraint(
                 # Expressed as "at least two of the three scope columns are null", i.e. at most one
@@ -296,12 +234,9 @@ class CompetencyRuleProfile(models.Model):
         if self.pk is None:
             # A new, unsaved instance: there's no persisted scope yet to compare against.
             return
-        # Always queries the database directly, rather than comparing against a value cached at
-        # load time: that avoids a deferred/only() load, or a refresh_from_db() call, silently
-        # bypassing this check. Explicitly targets self._state.db, the alias this instance
-        # actually belongs to, so an instance loaded from a non-default database is not silently
-        # compared against the wrong one. Guarded against the row having since been deleted, in
-        # which case there's nothing left to compare against either.
+        # Queried rather than compared against a value cached at load time, so a deferred load or
+        # a refresh_from_db() cannot bypass the check. `using` keeps a non-default-database
+        # instance from being compared against the wrong alias.
         persisted_scope = (
             CompetencyRuleProfile.objects.using(self._state.db)
             .filter(pk=self.pk)
@@ -325,21 +260,18 @@ class CompetencyRuleProfile(models.Model):
         self._check_scope_immutable()
         validate_rule_payload(self.rule_type, self.rule_payload)
 
+    def _compute_scope_code(self) -> str | None:
+        """Return this profile's scope_code, or None while it is archived."""
+        if self.archived:
+            return None
+        scope_ids = (self.organization_id, self.course_id, self.competency_taxonomy_id)
+        return "org:{},course:{},taxonomy:{}".format(*("" if pk is None else pk for pk in scope_ids))
+
     def save(self, *args, **kwargs):
         """Recompute scope_code, then persist this profile after full_clean() re-validates it."""
-        self.scope_code = None if self.archived else (
-            f"org:{'' if self.organization_id is None else self.organization_id},"
-            f"course:{'' if self.course_id is None else self.course_id},"
-            f"taxonomy:{'' if self.competency_taxonomy_id is None else self.competency_taxonomy_id}"
-        )
-        # validate_unique and validate_constraints are left to the database: the unique and check
-        # constraints above enforce them identically and without the extra queries full_clean()
-        # would otherwise run to pre-check them in Python. Matches CourseRun.save() at
-        # src/openedx_catalog/models/course_run.py. Neither the non-editable scope_code nor the
-        # nullable override-style fields on this model cause full_clean() to reject an otherwise
-        # valid row: Django's own Field.validate() skips every check for a field with
-        # editable=False, and a blank=True field with an empty value is skipped by clean_fields()
-        # before validation runs at all.
+        self.scope_code = self._compute_scope_code()
+        # Ensure that we run the validations/defaults defined in clean().
+        # But don't validate_unique(); it just runs extra queries and the database enforces it anyways.
         self.full_clean(validate_unique=False, validate_constraints=False)
         super().save(*args, **kwargs)
 
@@ -391,23 +323,15 @@ class CompetencyCriterion(models.Model):
         related_name="criteria",
         help_text=_("The profile this criterion uses by default. Null only when overrides are set instead."),
     )
-    rule_type_override = models.CharField(max_length=32, choices=_RULE_TYPE_CHOICES, null=True, blank=True)
+    rule_type_override = models.CharField(max_length=32, choices=RuleType, null=True, blank=True)
     rule_payload_override = models.JSONField(null=True, blank=True)
 
     history = HistoricalRecords()
 
     class Meta:
-        # No db_table override, so the table is Django's default,
-        # openedx_learning_competencycriterion. ADR-0002 Decision 4's heading reads
-        # "CompetencyCriterion concept (CompetencyCriteria database table)", which names the
-        # domain concept the way every other heading in that ADR does rather than instructing a
-        # rename. No model anywhere in src/ overrides db_table, so every table in this library
-        # is <app_label>_<model>.
-        #
-        # Django's default pluralization of "CompetencyCriterion" is the ungrammatical
-        # "competency criterions"; set both explicitly, matching ADR-0002 Decision 4's
-        # terminology (one leaf is a criterion, the collection is CompetencyCriteria) and
-        # following CompetencyTaxonomy, which sets both for the same reason.
+        # No db_table override: the table is Django's default, openedx_learning_competencycriterion.
+        # verbose_name/verbose_name_plural are set explicitly because Django's default pluralization
+        # of "CompetencyCriterion" is "competency criterions". See ADR-0002 Decision 4.
         verbose_name = _("Competency Criterion")
         verbose_name_plural = _("Competency Criteria")
         constraints = [
@@ -440,7 +364,5 @@ class CompetencyCriterion(models.Model):
 
     def save(self, *args, **kwargs):
         """Persist this criterion, after full_clean() re-validates the override payload, if set."""
-        # See CompetencyRuleProfile.save() above for why validate_unique/validate_constraints are
-        # skipped here too, and why the nullable override fields don't trip full_clean() when unset.
         self.full_clean(validate_unique=False, validate_constraints=False)
         super().save(*args, **kwargs)
