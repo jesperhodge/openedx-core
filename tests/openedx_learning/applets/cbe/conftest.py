@@ -1,0 +1,40 @@
+"""Shared fixtures for the CBE criteria test modules."""
+import pytest
+from organizations.api import ensure_organization
+from organizations.models import Organization
+
+from openedx_catalog.models import CatalogCourse, CourseRun
+from openedx_learning.models import CompetencyCriteriaGroup, CompetencyTaxonomy
+from openedx_tagging.models import Tag
+
+
+@pytest.fixture(name="organization")
+def _organization() -> Organization:
+    """An Organization for use as a scope in these tests."""
+    ensure_organization("Org1")
+    return Organization.objects.get(short_name="Org1")
+
+
+@pytest.fixture(name="course_run")
+def _course_run(organization: Organization) -> CourseRun:
+    """A CourseRun for use as a scope in these tests."""
+    catalog_course = CatalogCourse.objects.create(org=organization, course_code="Python100")
+    return CourseRun.objects.create(catalog_course=catalog_course, run_code="Fall2026")
+
+
+@pytest.fixture(name="competency_taxonomy")
+def _competency_taxonomy() -> CompetencyTaxonomy:
+    """A CompetencyTaxonomy for use as a scope, and as the home taxonomy for `tag`."""
+    return CompetencyTaxonomy.objects.create(name="Nursing", export_id="nursing-v1")
+
+
+@pytest.fixture(name="tag")
+def _tag(competency_taxonomy: CompetencyTaxonomy) -> Tag:
+    """A Tag, from `competency_taxonomy`, for use as the competency a criteria tree evaluates."""
+    return Tag.objects.create(taxonomy=competency_taxonomy, value="Writing Poetry")
+
+
+@pytest.fixture(name="group")
+def _group(tag: Tag) -> CompetencyCriteriaGroup:
+    """A root CompetencyCriteriaGroup for `tag`, for use as a criterion's parent group."""
+    return CompetencyCriteriaGroup.objects.create(tag=tag)
