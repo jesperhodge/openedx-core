@@ -1,22 +1,30 @@
 """
-The CompetencyAchievementCriteria tree: CompetencyCriteriaGroup, the internal AND/OR node.
+The CompetencyAchievementCriteria models: CompetencyCriteriaGroup, the internal AND/OR node,
+and CompetencyRuleProfile, the reusable evaluation rule its leaves draw from.
 
-See :ref:`openedx-learning-adr-0002` Decision 2 for the design and Decision 7 for why every
-foreign key here cascades, and :ref:`openedx-learning-adr-0003` Decisions 1 and 2 for why this
-model carries ``django-simple-history`` tracking and CompetencyTaxonomy does not.
+See :ref:`openedx-learning-adr-0002` Decisions 2 and 3 for the design and Decision 7 for each
+foreign key's delete behavior, and :ref:`openedx-learning-adr-0003` Decisions 1 and 2 for why
+these models carry ``django-simple-history`` tracking and CompetencyTaxonomy does not.
 """
 from __future__ import annotations
 
+from django.core.exceptions import ValidationError
 from django.db import models
+from django.db.models import Q
 from django.utils.translation import gettext_lazy as _
+from organizations.models import Organization
 from simple_history.models import HistoricalRecords
 
 from openedx_catalog.models import CourseRun
 from openedx_django_lib.fields import case_insensitive_char_field, immutable_uuid_field
 from openedx_tagging.models import Tag
 
+from ..rule_payloads import RuleType, validate_rule_payload
+from .competency_taxonomy import CompetencyTaxonomy
+
 __all__ = [
     "CompetencyCriteriaGroup",
+    "CompetencyRuleProfile",
     "LogicOperator",
 ]
 
@@ -101,3 +109,153 @@ class CompetencyCriteriaGroup(models.Model):
         # No constraint tying `logic_operator` to child count, and no UniqueConstraint on (parent,
         # ordering): a child group cannot be saved until its parent's primary key exists, so
         # neither has a single-row state to check at save time. See ADR-0002 Decision 2.
+
+
+class CompetencyRuleProfile(models.Model):
+    """
+    A reusable default evaluation rule, optionally scoped to a taxonomy, course, or organization.
+
+    Each row is scoped by at most one of ``organization``, ``course``, and ``competency_taxonomy``,
+    enforced by the check constraint below; the row with all three null is the system default,
+    seeded once by migration and never created or deleted through the profile API. See ADR-0002
+    Decision 3 for how a :class:`CompetencyCriterion` is assigned one of these, and Decision 4 for
+    what happens when more than one scope's profile could apply to the same criterion.
+
+    A profile's scope is immutable after creation; only ``rule_type``, ``rule_payload`` and
+    ``archived`` may change.
+
+    .. no_pii:
+    """
+
+    uuid = immutable_uuid_field()
+    organization = models.ForeignKey(
+        Organization,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="competency_rule_profiles",
+        help_text=_("The organization this profile is scoped to, if any."),
+    )
+    course = models.ForeignKey(
+        CourseRun,
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        related_name="competency_rule_profiles",
+        help_text=_("The course run this profile is scoped to, if any."),
+    )
+    competency_taxonomy = models.ForeignKey(
+        CompetencyTaxonomy,
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        related_name="rule_profiles",
+        help_text=_("The competency taxonomy this profile is scoped to, if any."),
+    )
+    # Recomputed in save(), never set directly: null while archived, so any number of archived
+    # rows may share a scope while exactly one live row holds it, which is what lets an archived
+    # profile be replaced. See ADR-0002 Decision 3.
+    scope_code = models.CharField(
+        max_length=255,
+        null=True,
+        editable=False,
+        help_text=_(
+            "Derived from organization/course/competency_taxonomy; null while archived, otherwise "
+            "\"org:X,course:Y,taxonomy:Z\" with each segment blank when that scope column is null."
+        ),
+    )
+    rule_type = models.CharField(max_length=32, choices=RuleType)
+    rule_payload = models.JSONField(
+        help_text=_("Structured payload keyed by rule_type; see validate_rule_payload for the shape it must match.")
+    )
+    archived = models.BooleanField(
+        default=False,
+        help_text=_(
+            "Hides a profile from authoring and from new associations while keeping it queryable, so "
+            "criteria already assigned to it stay resolvable."
+        ),
+    )
+
+    # scope_code is excluded from history: it is a derived, non-editable bookkeeping column (see
+    # above), not an author-facing fact worth its own historical row -- the columns it derives
+    # from (organization, course, competency_taxonomy, archived) are already tracked, and are what
+    # an audit trail actually needs.
+    history = HistoricalRecords(excluded_fields=["scope_code"])
+
+    class Meta:
+        constraints = [
+            # Unconditional, over the derived scope_code column rather than the raw nullable
+            # scope columns: MySQL has no partial unique indexes and Django silently skips
+            # creating one there. See ADR-0002 Rejected Alternative 6.
+            models.UniqueConstraint(fields=["scope_code"], name="oel_cbe_ruleprofile_scope_code_uniq"),
+            models.CheckConstraint(
+                # Expressed as "at least two of the three scope columns are null", i.e. at most one
+                # is non-null.
+                condition=(
+                    Q(organization__isnull=True, course__isnull=True)
+                    | Q(organization__isnull=True, competency_taxonomy__isnull=True)
+                    | Q(course__isnull=True, competency_taxonomy__isnull=True)
+                ),
+                name="oel_cbe_ruleprofile_scope_check",
+                violation_error_message=_(
+                    "A CompetencyRuleProfile may be scoped to at most one of organization, course, and "
+                    "competency_taxonomy."
+                ),
+            ),
+            models.CheckConstraint(
+                # Keeps scope_code's invariant honest against QuerySet.update(), which bypasses
+                # save(): the database refuses the row rather than letting this get out of sync
+                # behind save()'s back.
+                condition=(
+                    Q(archived=True, scope_code__isnull=True) | Q(archived=False, scope_code__isnull=False)
+                ),
+                name="oel_cbe_ruleprofile_archived_scope_code_check",
+                violation_error_message=_(
+                    "An archived CompetencyRuleProfile must have a null scope_code; a live one must not."
+                ),
+            ),
+        ]
+
+    def _check_scope_immutable(self) -> None:
+        """Raise ValidationError if the scope columns no longer match what is persisted for this row."""
+        if self.pk is None:
+            # A new, unsaved instance: there's no persisted scope yet to compare against.
+            return
+        # Queried rather than compared against a value cached at load time, so a deferred load or
+        # a refresh_from_db() cannot bypass the check.
+        persisted_scope = (
+            CompetencyRuleProfile.objects.filter(pk=self.pk)
+            .values_list("organization_id", "course_id", "competency_taxonomy_id")
+            .first()
+        )
+        if persisted_scope is None:
+            return
+        current_scope = (self.organization_id, self.course_id, self.competency_taxonomy_id)
+        if current_scope != persisted_scope:
+            raise ValidationError(
+                _(
+                    "A CompetencyRuleProfile's scope (organization, course, competency_taxonomy) cannot be "
+                    "changed after creation."
+                )
+            )
+
+    def clean(self):
+        """Validate scope immutability and the rule_payload shape for rule_type."""
+        super().clean()
+        self._check_scope_immutable()
+        validate_rule_payload(self.rule_type, self.rule_payload)
+
+    def _compute_scope_code(self) -> str | None:
+        """Return this profile's scope_code, or None while it is archived."""
+        if self.archived:
+            return None
+        # A blank segment, not "None", for an unset scope: ADR-0002 Decision 3 fixes this format.
+        org, course, taxonomy = self.organization_id, self.course_id, self.competency_taxonomy_id
+        return f"org:{org or ''},course:{course or ''},taxonomy:{taxonomy or ''}"
+
+    def save(self, *args, **kwargs):
+        """On save: recompute and validate scope_code."""
+        self.scope_code = self._compute_scope_code()
+        # validate_unique() is already enforced by the database.
+        self.full_clean(validate_unique=False, validate_constraints=False)
+        super().save(*args, **kwargs)
