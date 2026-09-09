@@ -5,7 +5,7 @@ from organizations.models import Organization
 
 from openedx_catalog.models import CatalogCourse, CourseRun
 from openedx_learning.models import CompetencyCriteriaGroup, CompetencyRuleProfile, CompetencyTaxonomy
-from openedx_tagging.models import Tag
+from openedx_tagging.models import ObjectTag, Tag
 
 
 @pytest.fixture(name="organization")
@@ -39,6 +39,16 @@ def _competency_taxonomy() -> CompetencyTaxonomy:
 def _tag(competency_taxonomy: CompetencyTaxonomy) -> Tag:
     """A Tag, from `competency_taxonomy`, for use as the competency a criteria tree evaluates."""
     return Tag.objects.create(taxonomy=competency_taxonomy, value="Writing Poetry")
+
+
+@pytest.fixture(name="object_tag")
+def _object_tag(competency_taxonomy: CompetencyTaxonomy, tag: Tag) -> ObjectTag:
+    """An ObjectTag associating `tag` with a made-up content object, a criterion's target."""
+    return ObjectTag.objects.create(
+        object_id="block-v1:Org1+Python100+Fall2026+problem+p1",
+        taxonomy=competency_taxonomy,
+        tag=tag,
+    )
 
 
 @pytest.fixture(name="group")
