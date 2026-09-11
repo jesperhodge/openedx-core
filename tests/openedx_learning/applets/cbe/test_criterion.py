@@ -9,9 +9,10 @@ Reading top to bottom gives the model's contract: its columns, the either-profil
 invariant and every way it can be violated, that an override payload is validated on save, that
 the stored profile is never re-resolved at read time, and its indexes and history.
 
-Delete behavior is not covered here and not decided here. Nothing in this module deletes a row
-that another row points at. See the change that settles delete behavior for those tests, which
-is also where the tree-wide integration tests live.
+Delete behavior is not covered here. Nothing in this module deletes a row that another row
+points at. See test_criterion_deletion.py, in this same change, for this model's own
+`on_delete` values, the transitive and scope-owner cases that only exist once this model
+completes the tree, and test_criteria_trees.py for the tree-wide integration test.
 
 Fixtures live in this directory's conftest.py.
 """
