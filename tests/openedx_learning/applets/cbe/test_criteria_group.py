@@ -6,8 +6,9 @@ Each test name states the behavior it pins. Reading top to bottom gives the mode
 its columns, its tree shape, the two constraints ADR-0002 Decision 2 deliberately leaves out,
 then its indexes and history.
 
-Delete behavior is not covered here and not decided here. Nothing in this module deletes a row
-that another row points at. See the change that settles delete behavior for those tests.
+Delete behavior is not covered here. Nothing in this module deletes a row that another row
+points at. See test_criteria_group_deletion.py, in this same change, for this model's own
+`on_delete` values and the tests that exercise them.
 
 Fixtures live in this directory's conftest.py.
 """
