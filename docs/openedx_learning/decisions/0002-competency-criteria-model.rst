@@ -131,7 +131,7 @@ Decision
    2. ``organization_id``: The ``organization_id`` of the organization that this competency rule profile is scoped to. Null if it is not scoped to a specific organization.
    3. ``course_id``: The ``course_id`` of the course that this competency rule profile is scoped to. Null if it is not scoped to a specific course.
    4. ``competency_taxonomy_id``: The ``CompetencyTaxonomy.taxonomy_ptr_id`` of the competency taxonomy that this competency rule profile is scoped to. Null if it is not scoped to a specific taxonomy.
-   5. ``scope_code``: A plain column, recomputed by the model's ``save()`` and never set directly, in the fixed, trivially-parseable format ``"org:X,course:Y,taxonomy:Z"``, with each segment left blank when the corresponding scope column is null: for example ``"org:5,course:,taxonomy:"``, or ``"org:,course:,taxonomy:"`` for the system default row. It is non-null when it is live, and null while archived. This frees an archived profile's scope for a replacement.
+   5. ``scope_code``: A plain column in the format ``"org:X,course:Y,taxonomy:Z"``, with each segment left blank when the corresponding scope column is null: for example ``"org:5,course:,taxonomy:"``, or ``"org:,course:,taxonomy:"`` for the system default row. It is non-null when it is live, and null while archived. This frees an archived profile's scope for a replacement.
    6. ``rule_type``: “View”, “Grade”, “MasteryLevel” (Only “Grade” will be supported for now)
    7. ``rule_payload``: JSON payload keyed by ``rule_type`` to avoid freeform strings. It is structured JSON (not arbitrary freeform data): each ``rule_type`` defines the allowed payload shape and required keys, and validation enforces this contract. JSON is used instead of fixed columns like ``op``, ``value``, and ``scale`` so that future rule types (for example, ``MasteryLevel`` thresholds or plugin-defined evaluators such as CEL-based rules) can add their own fields without repeated schema migrations or many nullable columns. Examples:
 
@@ -455,4 +455,6 @@ Changelog
 
 2026-09-09:
 
-* For issue #641: ``scope_code`` on ``CompetencyRuleProfile`` is now computed on ``save()``.
+* ``scope_code`` on ``CompetencyRuleProfile`` is now computed by
+  application code instead of being database-generated, and is set to null while a
+  profile is archived, freeing its scope for a replacement.
