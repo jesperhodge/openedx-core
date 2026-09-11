@@ -13,6 +13,6 @@ class Migration(migrations.Migration):
         migrations.AddField(
             model_name='competencytaxonomy',
             name='taxonomy_overrides_org',
-            field=models.BooleanField(default=False, help_text="Resolves a tie when assigning a CompetencyRuleProfile to a CompetencyCriterion (ADR-0002 Decision 4): if both an organization-scoped profile and a taxonomy-scoped profile from this taxonomy apply to the same criterion, False (the default) assigns the organization-scoped profile, and True assigns this taxonomy's own profile instead, so it cannot be locally weakened by an organization."),
+            field=models.BooleanField(default=False, help_text="If both an organization-scoped profile and a taxonomy-scoped profile from this taxonomy apply to the same criterion, False (the default) assigns the organization-scoped profile, and True assigns this taxonomy's own profile."),
         ),
     ]
