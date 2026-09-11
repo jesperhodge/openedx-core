@@ -9,9 +9,10 @@ change after creation, and the index, history and seeded row.
 The payload shapes themselves are covered exhaustively and without a database in
 test_rule_payloads.py. What matters here is only that a model save reaches that validator.
 
-Delete behavior is not covered here and not decided here. Nothing in this module deletes a row
-that another row points at, except where a test frees the seeded system-default scope, which
-nothing references. See the change that settles delete behavior for those tests.
+Delete behavior is not covered here, except where a test frees the seeded system-default scope,
+which nothing references. Nothing else in this module deletes a row that another row points at.
+See test_rule_profile_deletion.py, in this same change, for this model's own `on_delete` values
+and the tests that exercise them.
 
 Fixtures live in this directory's conftest.py.
 """
