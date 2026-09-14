@@ -98,16 +98,18 @@ def test_a_cascaded_group_removal_is_recorded_in_history(tag: Tag) -> None:
 def test_deleting_a_group_at_depth_also_deletes_every_descendant_group(tag: Tag) -> None:
     """
     Deleting a CompetencyCriteriaGroup removes not just its direct children but every group
-    beneath it at any depth, while leaving an unrelated ancestor alone: `parent` is a
-    self-referential CASCADE, so Django's collector walks the whole subtree, not just one level.
+    beneath it at any depth: `parent` is a self-referential CASCADE, so a single delete has
+    Django's collector walk the whole subtree, not just one level. Deleting the root and checking
+    the grandchild is what actually exercises that recursion; deleting the middle node instead
+    would only re-prove the one-hop cascade the depth-1 test above already covers.
     """
     root = CompetencyCriteriaGroup.objects.create(tag=tag)
     child = CompetencyCriteriaGroup.objects.create(tag=tag, parent=root)
     grandchild = CompetencyCriteriaGroup.objects.create(tag=tag, parent=child)
 
-    child.delete()
+    root.delete()
 
-    assert CompetencyCriteriaGroup.objects.filter(pk=root.pk).exists()
+    assert not CompetencyCriteriaGroup.objects.filter(pk=root.pk).exists()
     assert not CompetencyCriteriaGroup.objects.filter(pk=child.pk).exists()
     assert not CompetencyCriteriaGroup.objects.filter(pk=grandchild.pk).exists()
 
