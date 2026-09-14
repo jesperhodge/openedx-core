@@ -98,6 +98,3 @@ class CompetencyCriteriaGroup(models.Model):
             # indexes every ForeignKey column by default, so a second explicit one here would only
             # cost write throughput without adding any read benefit.
         ]
-        # No constraint tying `logic_operator` to child count, and no UniqueConstraint on (parent,
-        # ordering): a child group cannot be saved until its parent's primary key exists, so
-        # neither has a single-row state to check at save time. See ADR-0002 Decision 2.
