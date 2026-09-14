@@ -1,10 +1,6 @@
 """
 Tests for the CBE rule payload contract: RuleType and validate_rule_payload.
 
-These need no database. validate_rule_payload is a plain function over a dict, and the models
-that call it from clean() arrive in later changes, so every behavior here is exercised directly
-rather than through a model save.
-
 ADR-0002 Decision 3 defines one payload shape per rule_type. The single supported type is
 "Grade", whose payload is {"op": ..., "value": ..., "scale": ...} where op is one of gte, lte or
 eq, value is a fraction from 0.0 to 1.0 rather than a number out of 100, and scale is "percent".
