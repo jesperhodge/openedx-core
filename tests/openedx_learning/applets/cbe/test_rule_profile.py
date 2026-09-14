@@ -24,6 +24,7 @@ from django.db.utils import IntegrityError
 from organizations.models import Organization
 
 from openedx_catalog.models import CatalogCourse, CourseRun
+from openedx_learning.applets.cbe.rule_payloads import validate_rule_payload
 from openedx_learning.models import CompetencyRuleProfile, CompetencyTaxonomy, RuleType
 
 pytestmark = pytest.mark.django_db
@@ -436,7 +437,7 @@ def test_scope_code_is_excluded_from_history() -> None:
 
 def test_migration_seeds_exactly_one_system_default_rule_profile() -> None:
     """
-    Migration 0003 seeds exactly one system-default CompetencyRuleProfile: all three scope
+    Migration 0005 seeds exactly one system-default CompetencyRuleProfile: all three scope
     columns null, not archived, Grade >= 0.8 (80%). See ADR-0002 Decision 3.
     """
     profile = CompetencyRuleProfile.objects.get(
@@ -445,3 +446,21 @@ def test_migration_seeds_exactly_one_system_default_rule_profile() -> None:
     assert profile.archived is False
     assert profile.rule_type == RuleType.GRADE
     assert profile.rule_payload == _GRADE_PAYLOAD
+
+
+def test_the_seeded_rule_payload_satisfies_the_payload_contract() -> None:
+    """
+    The seeded system-default row's rule_payload passes validate_rule_payload.
+
+    0005_seed_default_rule_profile writes that payload as a literal and cannot check it itself: a
+    historical migration must not import rule_payloads, because that module changes while the
+    migration must not, and apps.get_model() returns a model reconstructed without the custom
+    clean(). This test is therefore the only place the seeded literal and the validator meet.
+    Without it, tightening _validate_grade_payload would leave the default row that every
+    deployment ships with invalid, and no test would fail.
+    """
+    profile = CompetencyRuleProfile.objects.get(
+        organization__isnull=True, course__isnull=True, competency_taxonomy__isnull=True
+    )
+
+    validate_rule_payload(profile.rule_type, profile.rule_payload)
