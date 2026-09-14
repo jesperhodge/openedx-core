@@ -1,8 +1,8 @@
 """
-The CompetencyAchievementCriteria models: CompetencyCriteriaGroup, the internal AND/OR node,
-and CompetencyRuleProfile, the reusable evaluation rule its leaves draw from.
+The CompetencyAchievementCriteria models: CompetencyCriteriaGroup, CompetencyRuleProfile, and
+CompetencyCriterion.
 
-See :ref:`openedx-learning-adr-0002` Decisions 2 and 3 for the design and Decision 7 for each
+See :ref:`openedx-learning-adr-0002` Decisions 2, 3 and 4 for the design and Decision 7 for each
 foreign key's delete behavior, and :ref:`openedx-learning-adr-0003` Decisions 1 and 2 for why
 these models carry ``django-simple-history`` tracking and CompetencyTaxonomy does not.
 """
@@ -17,13 +17,14 @@ from simple_history.models import HistoricalRecords
 
 from openedx_catalog.models import CourseRun
 from openedx_django_lib.fields import case_insensitive_char_field, immutable_uuid_field
-from openedx_tagging.models import Tag
+from openedx_tagging.models import ObjectTag, Tag
 
 from ..rule_payloads import RuleType, validate_rule_payload
 from .competency_taxonomy import CompetencyTaxonomy
 
 __all__ = [
     "CompetencyCriteriaGroup",
+    "CompetencyCriterion",
     "CompetencyRuleProfile",
     "LogicOperator",
 ]
@@ -257,5 +258,97 @@ class CompetencyRuleProfile(models.Model):
         """On save: recompute and validate scope_code."""
         self.scope_code = self._compute_scope_code()
         # validate_unique() is already enforced by the database.
+        self.full_clean(validate_unique=False, validate_constraints=False)
+        super().save(*args, **kwargs)
+
+
+class CompetencyCriterion(models.Model):
+    """
+    A leaf node in a CompetencyAchievementCriteria tree: one tag/object association plus its rule.
+
+    A null ``rule_profile`` does NOT mean "resolve the applicable profile at read time." ADR-0002
+    Decision 4 resolves which profile (or override) applies at four specific write events
+    (creation, a more specific profile appearing later, an author setting a per-criterion
+    override, and an override being cleared back to matching the computed profile), and stores
+    the result. ``rule_profile`` is null only when an author has set a per-criterion override; in
+    every other case it holds the id of the profile that was resolved at the relevant write event
+    and is never re-resolved dynamically. Do not add a property, manager method, or other helper
+    that recomputes it; that would contradict the ADR.
+
+    When ``rule_type_override`` is set, its ``rule_payload_override``'s shape (see
+    :func:`~openedx_learning.applets.cbe.rule_payloads.validate_rule_payload`) is validated from
+    ``clean()``, reached from both ``objects.create()`` and a plain ``instance.save()`` via
+    ``full_clean()``. A bulk ``QuerySet.update()``, ``bulk_create()``, and a DRF serializer that
+    writes straight to the database are NOT covered: none of them build or save a model instance,
+    so ``clean()`` never runs.
+
+    .. no_pii:
+    """
+
+    uuid = immutable_uuid_field()
+    group = models.ForeignKey(
+        CompetencyCriteriaGroup,
+        db_column="competency_criteria_group_id",
+        on_delete=models.CASCADE,
+        related_name="criteria",
+        help_text=_("The CompetencyCriteriaGroup this leaf criterion belongs to."),
+    )
+    object_tag = models.ForeignKey(
+        ObjectTag,
+        db_column="oel_tagging_objecttag_id",
+        on_delete=models.CASCADE,
+        related_name="competency_criteria",
+        help_text=_("The tag/object association that this criterion evaluates."),
+    )
+    rule_profile = models.ForeignKey(
+        CompetencyRuleProfile,
+        null=True,
+        blank=True,
+        db_column="competency_rule_profile_id",
+        on_delete=models.RESTRICT,
+        related_name="criteria",
+        help_text=_("The profile this criterion uses by default. Null only when overrides are set instead."),
+    )
+    rule_type_override = models.CharField(max_length=32, choices=RuleType, null=True, blank=True)
+    rule_payload_override = models.JSONField(null=True, blank=True)
+
+    history = HistoricalRecords()
+
+    class Meta:
+        # No db_table override: the table is Django's default, openedx_learning_competencycriterion.
+        # verbose_name/verbose_name_plural are set explicitly because Django's default pluralization
+        # of "CompetencyCriterion" is "competency criterions". See ADR-0002 Decision 4.
+        verbose_name = _("Competency Criterion")
+        verbose_name_plural = _("Competency Criteria")
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    Q(
+                        rule_profile__isnull=False,
+                        rule_type_override__isnull=True,
+                        rule_payload_override__isnull=True,
+                    )
+                    | Q(
+                        rule_profile__isnull=True,
+                        rule_type_override__isnull=False,
+                        rule_payload_override__isnull=False,
+                    )
+                ),
+                name="oel_cbe_criterion_profile_xor_override_check",
+                violation_error_message=_(
+                    "A CompetencyCriterion must have either a rule_profile with no overrides, or both override "
+                    "fields set with no rule_profile. Never both, never neither."
+                ),
+            ),
+        ]
+
+    def clean(self):
+        """Validate the override rule_payload's shape, when a per-criterion override is set."""
+        super().clean()
+        if self.rule_type_override is not None:
+            validate_rule_payload(self.rule_type_override, self.rule_payload_override)
+
+    def save(self, *args, **kwargs):
+        """Persist this criterion, after full_clean() re-validates the override payload, if set."""
         self.full_clean(validate_unique=False, validate_constraints=False)
         super().save(*args, **kwargs)
