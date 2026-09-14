@@ -12,13 +12,7 @@ eq, value is a fraction from 0.0 to 1.0 rather than a number out of 100, and sca
 import pytest
 from django.core.exceptions import ValidationError
 
-# Private: the payload-spec registry, compared against RuleType's declared choices below.
-from openedx_learning.applets.cbe.rule_payloads import (
-    _RULE_PAYLOAD_SPECS,
-    GradePayload,
-    RuleType,
-    validate_rule_payload,
-)
+from openedx_learning.applets.cbe.rule_payloads import GradePayload, RuleType, validate_rule_payload
 
 _GRADE_PAYLOAD: GradePayload = {"op": "gte", "value": 0.8, "scale": "percent"}
 
@@ -123,13 +117,21 @@ def test_an_unsupported_rule_type_says_only_grade_is_defined() -> None:
     assert "not supported yet" in " ".join(exc_info.value.messages)
 
 
-def test_rule_type_declares_exactly_the_types_that_have_a_payload_spec() -> None:
+@pytest.mark.parametrize("rule_type", list(RuleType))
+def test_every_rule_type_choice_has_a_validation_branch(rule_type: RuleType) -> None:
     """
-    RuleType's choices, which is what a serializer or admin form offers an author, contain exactly
-    the rule types that can actually be saved.
+    Every RuleType choice, which is what a serializer or admin form offers an author, is actually
+    saveable: validate_rule_payload's match statement has a case for it, rather than falling
+    through to the catch-all "not supported yet" case.
 
-    A rule_type with no payload spec is always rejected regardless of payload content, so
-    declaring a RuleType member without its spec would offer an author a dead-end choice. This
-    pins the invariant so adding one without the other fails a test instead of shipping.
+    A rule_type with no validation branch is always rejected regardless of payload content, so
+    declaring a RuleType member without a branch for it would offer an author a dead-end choice.
+    An empty payload is wrong for every currently defined shape, so it is rejected here too, but
+    for a shape-specific reason (e.g. missing keys) rather than because the rule_type itself is
+    unsupported. This pins the invariant so adding a RuleType member without a branch fails a test
+    instead of shipping.
     """
-    assert {value for value, _label in RuleType.choices} == set(_RULE_PAYLOAD_SPECS)
+    with pytest.raises(ValidationError) as exc_info:
+        validate_rule_payload(rule_type, {})
+
+    assert "not supported yet" not in " ".join(exc_info.value.messages)
