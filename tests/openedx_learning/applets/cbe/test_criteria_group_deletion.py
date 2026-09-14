@@ -14,10 +14,10 @@ Fixtures live in this directory's conftest.py.
 """
 import pytest
 from django.apps import apps
-from django.db import connection
+from django.db import connection, models
 
 from openedx_catalog.models import CourseRun
-from openedx_learning.models import CompetencyCriteriaGroup
+from openedx_learning.models import CompetencyCriteriaGroup, CompetencyTaxonomy
 from openedx_tagging.models import Tag
 
 pytestmark = pytest.mark.django_db
@@ -93,6 +93,49 @@ def test_a_cascaded_group_removal_is_recorded_in_history(tag: Tag) -> None:
     tag.delete()
 
     assert historical_group.objects.filter(id=group_pk, history_type="-").exists()
+
+
+def test_deleting_a_group_at_depth_also_deletes_every_descendant_group(tag: Tag) -> None:
+    """
+    Deleting a CompetencyCriteriaGroup removes not just its direct children but every group
+    beneath it at any depth, while leaving an unrelated ancestor alone: `parent` is a
+    self-referential CASCADE, so Django's collector walks the whole subtree, not just one level.
+    """
+    root = CompetencyCriteriaGroup.objects.create(tag=tag)
+    child = CompetencyCriteriaGroup.objects.create(tag=tag, parent=root)
+    grandchild = CompetencyCriteriaGroup.objects.create(tag=tag, parent=child)
+
+    child.delete()
+
+    assert CompetencyCriteriaGroup.objects.filter(pk=root.pk).exists()
+    assert not CompetencyCriteriaGroup.objects.filter(pk=child.pk).exists()
+    assert not CompetencyCriteriaGroup.objects.filter(pk=grandchild.pk).exists()
+
+
+def test_deleting_a_taxonomy_also_deletes_its_tags_criteria_groups(competency_taxonomy: CompetencyTaxonomy) -> None:
+    """
+    Deleting a CompetencyTaxonomy cascades through every Tag it owns (already CASCADE in
+    openedx_tagging) and, transitively, through this model's own `tag` CASCADE: every
+    CompetencyCriteriaGroup for a tag under that taxonomy is gone too.
+    """
+    tag = Tag.objects.create(taxonomy=competency_taxonomy, value="Writing Poetry")
+    group = CompetencyCriteriaGroup.objects.create(tag=tag)
+
+    competency_taxonomy.delete()
+
+    assert not Tag.objects.filter(pk=tag.pk).exists()
+    assert not CompetencyCriteriaGroup.objects.filter(pk=group.pk).exists()
+
+
+def test_competencycriteriagroup_has_no_delete_override() -> None:
+    """
+    CompetencyCriteriaGroup defines no `delete()` override: cascading is expressed entirely
+    through the `on_delete` values on its foreign keys, per ADR-0002 Decision 7. No delete-lock
+    or archive-versus-delete branch lands in this ticket; #655 owns that, at the application
+    layer, driven by a lock flag on oel_tagging_objecttag.
+    """
+    assert "delete" not in CompetencyCriteriaGroup.__dict__
+    assert CompetencyCriteriaGroup.delete is models.Model.delete
 
 
 # ---------------------------------------------------------------------------------------------
