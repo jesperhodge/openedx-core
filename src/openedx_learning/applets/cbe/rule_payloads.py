@@ -7,7 +7,7 @@ or admin form, so they must not leak internal class or function names.
 """
 from __future__ import annotations
 
-from typing import Callable, Literal, TypedDict, get_args
+from typing import Literal, TypedDict, get_args
 
 from django.core.exceptions import ValidationError
 from django.db import models
@@ -24,9 +24,10 @@ class RuleType(models.TextChoices):
     """
     The evaluation rule types a CompetencyRuleProfile or CompetencyCriterion override can use.
 
-    Declares exactly the rule types with a defined rule_payload shape below, i.e. exactly the keys
-    of ``_RULE_PAYLOAD_SPECS``: see this module's own docstring for why the two are never allowed
-    to drift apart.
+    Declares exactly the rule types with a defined rule_payload shape below, i.e. exactly the
+    cases ``validate_rule_payload`` matches on: a member with no matching case falls through to
+    that function's ``case _``, which always rejects, so drift between the two fails a test
+    instead of shipping.
     """
 
     GRADE = "Grade", _("Grade")
@@ -69,29 +70,11 @@ def _validate_grade_payload(payload: dict[str, object]) -> None:
         raise ValidationError(_("The 'scale' in a 'Grade' rule_payload must be 'percent'."))
 
 
-# The required keys and validator for each rule type that has a defined payload shape. RuleType
-# declares exactly these types, so a rule type can never be offered as a choice without being
-# saveable. Adding one is a TypedDict, a validator, an entry here, and the matching RuleType member.
-# Keys come from the TypedDict's ``__annotations__``, not the ``__required_keys__`` that reads more
-# naturally here, because pylint does not model the latter. The two agree: every payload key of
-# every rule type is required, and none is NotRequired.
-_RULE_PAYLOAD_SPECS: dict[str, tuple[frozenset[str], Callable[[dict[str, object]], None]]] = {
-    RuleType.GRADE: (frozenset(GradePayload.__annotations__), _validate_grade_payload),
-}
+_GRADE_PAYLOAD_KEYS: frozenset[str] = frozenset(GradePayload.__annotations__)
 
 
-def validate_rule_payload(rule_type: str, payload: object) -> None:
-    """
-    Raise ValidationError unless ``payload`` matches the shape ADR-0002 Decision 3 defines for
-    ``rule_type``, including when ``rule_type`` has no defined shape at all.
-    """
-    spec = _RULE_PAYLOAD_SPECS.get(rule_type)
-    if spec is None:
-        raise ValidationError(
-            _("Rule type '%(rule_type)s' is not supported yet; only 'Grade' has a defined rule_payload shape.")
-            % {"rule_type": rule_type}
-        )
-    expected_keys, validate_values = spec
+def _validate_payload_keys(rule_type: str, payload: object, expected_keys: frozenset[str]) -> dict[str, object]:
+    """Raise ValidationError unless ``payload`` is a JSON object with exactly ``expected_keys``."""
     if not isinstance(payload, dict):
         raise ValidationError(_("A '%(rule_type)s' rule_payload must be a JSON object.") % {"rule_type": rule_type})
     missing = sorted(expected_keys - payload.keys())
@@ -105,4 +88,20 @@ def validate_rule_payload(rule_type: str, payload: object) -> None:
                 "unexpected": ", ".join(unexpected) or _("none"),
             }
         )
-    validate_values(payload)
+    return payload
+
+
+def validate_rule_payload(rule_type: str, payload: object) -> None:
+    """
+    Raise ValidationError unless ``payload`` matches the shape ADR-0002 Decision 3 defines for
+    ``rule_type``, including when ``rule_type`` has no defined shape at all.
+    """
+    match rule_type:
+        case RuleType.GRADE:
+            grade_payload = _validate_payload_keys(rule_type, payload, _GRADE_PAYLOAD_KEYS)
+            _validate_grade_payload(grade_payload)
+        case _:
+            raise ValidationError(
+                _("Rule type '%(rule_type)s' is not supported yet; only 'Grade' has a defined rule_payload shape.")
+                % {"rule_type": rule_type}
+            )
