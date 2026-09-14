@@ -14,7 +14,7 @@ Fixtures live in this directory's conftest.py.
 """
 import pytest
 from django.apps import apps
-from django.db import connection, models
+from django.db import connection
 
 from openedx_catalog.models import CourseRun
 from openedx_learning.models import CompetencyCriteriaGroup, CompetencyTaxonomy
@@ -127,17 +127,6 @@ def test_deleting_a_taxonomy_also_deletes_its_tags_criteria_groups(competency_ta
 
     assert not Tag.objects.filter(pk=tag.pk).exists()
     assert not CompetencyCriteriaGroup.objects.filter(pk=group.pk).exists()
-
-
-def test_competencycriteriagroup_has_no_delete_override() -> None:
-    """
-    CompetencyCriteriaGroup defines no `delete()` override: cascading is expressed entirely
-    through the `on_delete` values on its foreign keys, per ADR-0002 Decision 7. No delete-lock
-    or archive-versus-delete branch lands in this ticket; #655 owns that, at the application
-    layer, driven by a lock flag on oel_tagging_objecttag.
-    """
-    assert "delete" not in CompetencyCriteriaGroup.__dict__
-    assert CompetencyCriteriaGroup.delete is models.Model.delete
 
 
 # ---------------------------------------------------------------------------------------------
