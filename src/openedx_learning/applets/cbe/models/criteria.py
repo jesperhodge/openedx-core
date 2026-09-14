@@ -163,7 +163,10 @@ class CompetencyRuleProfile(models.Model):
     )
     rule_type = models.CharField(max_length=32, choices=RuleType)
     rule_payload = models.JSONField(
-        help_text=_("Structured payload keyed by rule_type; see validate_rule_payload for the shape it must match.")
+        help_text=_(
+            'Structured payload whose keys are set by rule_type. A "Grade" payload is '
+            '{"op": "gte" | "lte" | "eq", "value": a fraction from 0.0 to 1.0, "scale": "percent"}.'
+        )
     )
     archived = models.BooleanField(
         default=False,
