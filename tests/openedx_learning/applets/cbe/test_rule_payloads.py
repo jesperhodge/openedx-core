@@ -13,9 +13,14 @@ import pytest
 from django.core.exceptions import ValidationError
 
 # Private: the payload-spec registry, compared against RuleType's declared choices below.
-from openedx_learning.applets.cbe.rule_payloads import _RULE_PAYLOAD_SPECS, RuleType, validate_rule_payload
+from openedx_learning.applets.cbe.rule_payloads import (
+    _RULE_PAYLOAD_SPECS,
+    GradePayload,
+    RuleType,
+    validate_rule_payload,
+)
 
-_GRADE_PAYLOAD = {"op": "gte", "value": 0.8, "scale": "percent"}
+_GRADE_PAYLOAD: GradePayload = {"op": "gte", "value": 0.8, "scale": "percent"}
 
 
 def test_a_well_formed_grade_payload_is_accepted() -> None:
