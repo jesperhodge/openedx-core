@@ -114,9 +114,10 @@ class CompetencyRuleProfile(models.Model):
 
     Each row is scoped by at most one of ``organization``, ``course``, and ``competency_taxonomy``,
     enforced by the check constraint below; the row with all three null is the system default,
-    seeded once by migration and never created or deleted through the profile API. See ADR-0002
-    Decision 3 for how a :class:`CompetencyCriterion` is assigned one of these, and Decision 4 for
-    what happens when more than one scope's profile could apply to the same criterion.
+    seeded once by migration and never created or deleted through the profile API. When more than
+    one scope could apply to the same criterion, the most specific one wins (course beats
+    organization/taxonomy), and taxonomy_overrides_org breaks the one remaining tie between an
+    organization- and a taxonomy-scoped profile. See ADR-0002 Decision 3 & 4 for more details.
 
     A profile's scope is immutable after creation; only ``rule_type``, ``rule_payload`` and
     ``archived`` may change.

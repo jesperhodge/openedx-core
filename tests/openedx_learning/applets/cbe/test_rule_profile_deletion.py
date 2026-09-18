@@ -1,19 +1,4 @@
-"""
-Delete-behavior tests for CompetencyRuleProfile's own foreign keys.
-
-| Foreign key | Value | Why |
-| CompetencyRuleProfile.organization | PROTECT | an Organization is not a competency record |
-| CompetencyRuleProfile.course | CASCADE | a course-scoped profile goes with its run |
-| CompetencyRuleProfile.competency_taxonomy | CASCADE | a taxonomy-scoped profile goes with its taxonomy |
-
-``on_delete`` expresses containment rather than protection (ADR-0002 Decision 7): it governs
-deletion of the row a foreign key points *at*, never the row holding it. A CompetencyRuleProfile
-is never hard-deleted by a *direct* delete of the profile itself; retirement is archive-only.
-That does not stop it being cascaded away as a side effect of deleting the course or taxonomy it
-is scoped to.
-
-Fixtures live in this directory's conftest.py.
-"""
+"""Delete-behavior tests for CompetencyRuleProfile's own foreign keys."""
 import pytest
 from django.db import connection
 from django.db.models import ProtectedError
@@ -83,10 +68,7 @@ def test_deleting_a_taxonomy_with_a_scoped_rule_profile_also_deletes_the_profile
 ) -> None:
     """
     Deleting a CompetencyTaxonomy cascades to any CompetencyRuleProfile scoped to it via
-    `competency_taxonomy`: the delete succeeds and the profile row is gone too, as #641
-    requires. Nothing changes behaviorally in this MVP, since only the all-null system-default
-    profile exists otherwise, so this scenario cannot arise until a taxonomy-scoped profile is
-    actually created, which no authoring screen does yet.
+    `competency_taxonomy`: the delete succeeds and the profile row is gone too.
     """
     profile = CompetencyRuleProfile.objects.create(
         competency_taxonomy=competency_taxonomy, rule_type=RuleType.GRADE, rule_payload=_GRADE_PAYLOAD
