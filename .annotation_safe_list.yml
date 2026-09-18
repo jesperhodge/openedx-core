@@ -79,6 +79,8 @@ openedx_content.UnitVersion:
   ".. no_pii:": "This model has no PII"
 openedx_learning.HistoricalCompetencyCriteriaGroup:
   ".. no_pii:": "This model has no PII"
+openedx_learning.HistoricalCompetencyRuleProfile:
+  ".. no_pii:": "This model has no PII"
 social_django.Association:
   ".. no_pii:": "This model has no PII"
 social_django.Code:

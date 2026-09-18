@@ -4,7 +4,7 @@ from organizations.api import ensure_organization
 from organizations.models import Organization
 
 from openedx_catalog.models import CatalogCourse, CourseRun
-from openedx_learning.models import CompetencyCriteriaGroup, CompetencyTaxonomy
+from openedx_learning.models import CompetencyCriteriaGroup, CompetencyRuleProfile, CompetencyTaxonomy
 from openedx_tagging.models import Tag
 
 
@@ -13,6 +13,13 @@ def _organization() -> Organization:
     """An Organization for use as a scope in these tests."""
     ensure_organization("Org1")
     return Organization.objects.get(short_name="Org1")
+
+
+@pytest.fixture(name="organization2")
+def _organization2() -> Organization:
+    """A second Organization, distinct from `organization`, for use as a scope in these tests."""
+    ensure_organization("Org2")
+    return Organization.objects.get(short_name="Org2")
 
 
 @pytest.fixture(name="course_run")
@@ -38,3 +45,13 @@ def _tag(competency_taxonomy: CompetencyTaxonomy) -> Tag:
 def _group(tag: Tag) -> CompetencyCriteriaGroup:
     """A root CompetencyCriteriaGroup for `tag`, for use as a criterion's parent group."""
     return CompetencyCriteriaGroup.objects.create(tag=tag)
+
+
+@pytest.fixture(name="default_rule_profile")
+def _default_rule_profile() -> CompetencyRuleProfile:
+    """The system-default CompetencyRuleProfile seeded by migration 0005."""
+    return CompetencyRuleProfile.objects.get(
+        organization__isnull=True,
+        course__isnull=True,
+        competency_taxonomy__isnull=True,
+    )
