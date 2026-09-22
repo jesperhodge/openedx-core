@@ -15,13 +15,6 @@ pytestmark = pytest.mark.django_db
 _GRADE_PAYLOAD = {"op": "gte", "value": 0.8, "scale": "percent"}
 
 
-# ---------------------------------------------------------------------------------------------
-# Schema
-
-
-# ---------------------------------------------------------------------------------------------
-
-
 def test_creating_a_rule_profile_persists_its_columns(organization: Organization) -> None:
     """
     Creating a CompetencyRuleProfile with values for `organization`, `rule_type`, and
@@ -182,6 +175,26 @@ def test_archiving_a_profile_nulls_scope_code_and_frees_its_scope_for_a_replacem
     )
     replacement.refresh_from_db()
     assert replacement.scope_code == f"org:{organization.pk},course:,taxonomy:"
+
+
+def test_archiving_the_seeded_system_default_frees_its_scope_for_a_replacement(
+    default_rule_profile: CompetencyRuleProfile,
+) -> None:
+    """
+    Archiving the seeded system-default profile (all three scope fields null) nulls its
+    scope_code, same as for a scoped profile, which frees the all-null scope for a brand new
+    system-default row.
+    """
+    assert default_rule_profile.scope_code == "org:,course:,taxonomy:"
+
+    default_rule_profile.archived = True
+    default_rule_profile.save()
+    default_rule_profile.refresh_from_db()
+    assert default_rule_profile.scope_code is None
+
+    replacement = CompetencyRuleProfile.objects.create(rule_type=RuleType.GRADE, rule_payload=_GRADE_PAYLOAD)
+    replacement.refresh_from_db()
+    assert replacement.scope_code == "org:,course:,taxonomy:"
 
 
 def test_two_live_profiles_cannot_share_the_same_scope(organization: Organization) -> None:
