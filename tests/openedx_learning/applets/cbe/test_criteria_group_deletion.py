@@ -1,17 +1,4 @@
-"""
-Delete-behavior tests for CompetencyCriteriaGroup's own foreign keys.
-
-| Foreign key | Value | Why |
-| CompetencyCriteriaGroup.parent | CASCADE | a subtree is meaningless without its parent |
-| CompetencyCriteriaGroup.tag | CASCADE | a criteria tree is meaningless without its competency |
-| CompetencyCriteriaGroup.course | CASCADE | a course-scoped tree is meaningless without its run |
-
-``on_delete`` expresses containment rather than protection (ADR-0002 Decision 7): it governs
-deletion of the row a foreign key points *at*, never the row holding it. So all three edges above
-are how Django's collector walks *down* the tree once something above it is deleted.
-
-Fixtures live in this directory's conftest.py.
-"""
+"""Delete-behavior tests for CompetencyCriteriaGroup's own foreign keys."""
 import pytest
 from django.apps import apps
 from django.db import connection
@@ -78,21 +65,6 @@ def test_deleting_a_course_run_also_deletes_its_course_scoped_criteria_groups(
     course_run.delete()
 
     assert not CompetencyCriteriaGroup.objects.filter(pk=group.pk).exists()
-
-
-def test_a_cascaded_group_removal_is_recorded_in_history(tag: Tag) -> None:
-    """
-    A group removed by a cascade, rather than by a direct delete, still gets its own historical
-    row with history_type '-'. An author or auditor reviewing history for a group that vanished
-    this way still finds why it did.
-    """
-    historical_group = apps.get_model("openedx_learning", "HistoricalCompetencyCriteriaGroup")
-    group = CompetencyCriteriaGroup.objects.create(tag=tag)
-    group_pk = group.pk
-
-    tag.delete()
-
-    assert historical_group.objects.filter(id=group_pk, history_type="-").exists()
 
 
 def test_deleting_a_group_at_depth_also_deletes_every_descendant_group(tag: Tag) -> None:

@@ -1,9 +1,14 @@
 """
-The CompetencyAchievementCriteria tree: CompetencyCriteriaGroup, the internal AND/OR node.
+The Competency Criteria tree: the AND/OR hierarchy of criteria that defines the rule for
+demonstrating mastery of one competency. CompetencyCriteriaGroup is this tree's internal
+AND/OR node: each group combines its child nodes, which may themselves be groups or, at the
+bottom of the tree, leaf :class:`CompetencyCriterion` rows. Each leaf names the learning
+object and the threshold used to measure it.
 
-See :ref:`openedx-learning-adr-0002` Decision 2 for the design and Decision 7 for why every
-foreign key here cascades, and :ref:`openedx-learning-adr-0003` Decisions 1 and 2 for why this
-model carries ``django-simple-history`` tracking and CompetencyTaxonomy does not.
+Every foreign key here cascades, so that deleting a tag, a course run, or a parent group
+removes the whole subtree beneath it (:ref:`openedx-learning-adr-0002` Decision 7). This
+model carries ``django-simple-history`` tracking so that changes to a criteria tree are
+auditable (:ref:`openedx-learning-adr-0003` Decisions 1 and 2).
 """
 from __future__ import annotations
 
@@ -30,9 +35,9 @@ class LogicOperator(models.TextChoices):
 
 class CompetencyCriteriaGroup(models.Model):
     """
-    An internal AND/OR node in a CompetencyAchievementCriteria expression tree.
+    An internal AND/OR node in a Competency Criteria tree.
 
-    A single CompetencyAchievementCriteria is one root CompetencyCriteriaGroup plus all of its
+    A single Competency Criteria tree is one root CompetencyCriteriaGroup plus all of its
     descendant groups and leaf :class:`CompetencyCriterion` rows. ``logic_operator`` says how
     this group's own children combine. ``ordering`` gives this group's own position among its
     siblings under their shared parent, which read-time evaluation and event-driven recomputation
