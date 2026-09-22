@@ -1,13 +1,5 @@
-"""
-Integrative tests for CompetencyAchievementCriteria trees.
-
-test_criteria_group_deletion.py, test_rule_profile_deletion.py, and test_criterion_deletion.py
-each prove one foreign key cascades or protects correctly in isolation. That is not the same
-claim as "deleting somewhere in the middle of a realistic tree leaves exactly the right rows
-behind and nothing else": a per-foreign-key test can pass while a wider tree still ends up with
-an orphaned group, a criterion pointing at nothing, or a sibling branch disturbed by a delete
-that should not have touched it. The test here builds a wider tree on purpose and asserts the
-full surviving/removed row set, not just that a cascade fired somewhere.
+"""Integrative test for the Competency Criteria tree: deleting a group partway down a wider,
+realistic tree removes exactly that subtree and leaves an untouched sibling branch alone.
 
 Fixtures shared with the other test modules in this directory live in its conftest.py.
 """
@@ -38,17 +30,14 @@ def test_deleting_a_middle_group_removes_its_subtree_but_leaves_the_rest_of_the_
     Tree built here, all under one root:
 
         root
-        |-- branch_to_delete (criterion: profile-assigned, via default_rule_profile)
-        |     `-- grandchild (criterion: override, no rule_profile)
-        `-- surviving_sibling (criterion: profile-assigned, via a taxonomy-scoped profile)
+        |-- branch_to_delete (criterion)
+        |     `-- grandchild (criterion)
+        `-- surviving_sibling (criterion)
 
     `branch_to_delete` is deleted. This exercises criteria at two different tree depths (on
-    `branch_to_delete` itself and on its child `grandchild`) with a genuine mix of the two ways a
-    criterion can be governed (a stored `rule_profile` vs. per-criterion overrides), and confirms
-    `surviving_sibling` and its own criterion are byte-for-byte untouched: same primary keys, still
-    present, in a tree that shares a root with the subtree that just got removed. A test that only
-    checks "the deleted branch is gone" cannot tell a correct cascade apart from one that
-    over-deletes into a sibling it should never have reached; this test can.
+    `branch_to_delete` itself and on its child `grandchild`), and confirms `surviving_sibling` and
+    its own criterion are byte-for-byte untouched: same primary keys, still present, in a tree that
+    shares a root with the subtree that just got removed.
     """
     root = CompetencyCriteriaGroup.objects.create(tag=tag, name="root")
     branch_to_delete = CompetencyCriteriaGroup.objects.create(tag=tag, parent=root, name="branch_to_delete")

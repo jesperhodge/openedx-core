@@ -310,8 +310,14 @@ class CompetencyCriterion(models.Model):
         related_name="criteria",
         help_text=_("The profile this criterion uses by default. Null only when overrides are set instead."),
     )
-    rule_type_override = models.CharField(max_length=32, choices=RuleType, null=True, blank=True)
-    rule_payload_override = models.JSONField(null=True, blank=True)
+    rule_type_override = models.CharField(
+        max_length=32, choices=RuleType, null=True, blank=True,
+        help_text=_("Overrides rule_profile's rule_type for this criterion. Set only when rule_profile is null."),
+    )
+    rule_payload_override = models.JSONField(
+        null=True, blank=True,
+        help_text=_("Overrides rule_profile's rule_payload for this criterion. Set only when rule_profile is null."),
+    )
 
     history = HistoricalRecords()
 
