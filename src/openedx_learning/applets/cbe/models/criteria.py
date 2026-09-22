@@ -265,23 +265,12 @@ class CompetencyRuleProfile(models.Model):
 
 class CompetencyCriterion(models.Model):
     """
-    A leaf node in a CompetencyAchievementCriteria tree: one tag/object association plus its rule.
+    A leaf node in a Competency Criteria tree: one tag/object association plus its rule.
 
-    A null ``rule_profile`` does NOT mean "resolve the applicable profile at read time." ADR-0002
-    Decision 4 resolves which profile (or override) applies at four specific write events
-    (creation, a more specific profile appearing later, an author setting a per-criterion
-    override, and an override being cleared back to matching the computed profile), and stores
-    the result. ``rule_profile`` is null only when an author has set a per-criterion override; in
-    every other case it holds the id of the profile that was resolved at the relevant write event
-    and is never re-resolved dynamically. Do not add a property, manager method, or other helper
-    that recomputes it; that would contradict the ADR.
-
-    When ``rule_type_override`` is set, its ``rule_payload_override``'s shape (see
-    :func:`~openedx_learning.applets.cbe.rule_payloads.validate_rule_payload`) is validated from
-    ``clean()``, reached from both ``objects.create()`` and a plain ``instance.save()`` via
-    ``full_clean()``. A bulk ``QuerySet.update()``, ``bulk_create()``, and a DRF serializer that
-    writes straight to the database are NOT covered: none of them build or save a model instance,
-    so ``clean()`` never runs.
+    A null `rule_profile` does not mean "resolve at read time." ADR-0002 Decision 4 resolves and
+    stores the applicable profile (or override) at specific write events only; `rule_profile` is
+    null only when a per-criterion override is set instead. Do not add a property, manager method,
+    or other helper that recomputes it; that would contradict the ADR.
 
     .. no_pii:
     """

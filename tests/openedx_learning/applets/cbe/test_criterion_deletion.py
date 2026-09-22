@@ -1,30 +1,5 @@
-"""
-Delete-behavior tests for CompetencyCriterion's own foreign keys, and for the transitive and
-scope-owner cases that only exist once this model completes the criteria tree.
-
-| Foreign key | Value | Why |
-| CompetencyCriterion.group | CASCADE | a leaf is meaningless without its group |
-| CompetencyCriterion.object_tag | CASCADE | a leaf is meaningless without its content association |
-| CompetencyCriterion.rule_profile | RESTRICT | a profile is never hard-deleted out from under a leaf |
-
-``on_delete`` expresses containment rather than protection (ADR-0002 Decision 7): it governs
-deletion of the row a foreign key points *at*, never the row holding it.
-
-``rule_profile`` is RESTRICT rather than PROTECT because the two differ exactly where it matters
-here. Both refuse a direct profile delete while a criterion is assigned to it. Only RESTRICT
-ignores referencing rows that the same operation is already deleting, which is what lets a scope
-owner's deletion carry its profile away instead of failing on a criterion that delete was about to
-remove anyway.
-
-Only the cascade half of each case is asserted. Every matching "raises ProtectedError because a
-learner status row exists" case needs #642's three Student*Status tables, and #642 is the change
-that creates them, so those assertions belong there. Nothing here stubs or fakes a status model
-to stand in for them. Until #642 merges, main carries a cascade chain with no PROTECT at the
-bottom, so deleting a tag removes the whole authored tree and nothing objects. That window is
-expected and harmless, because the learner status tables do not exist yet.
-
-Fixtures live in this directory's conftest.py.
-"""
+"""Delete-behavior tests for CompetencyCriterion's own foreign keys, and the transitive and
+scope-owner cases that only exist once this model completes the criteria tree."""
 import pytest
 from django.apps import apps
 from django.db.models import RestrictedError

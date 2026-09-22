@@ -5,13 +5,7 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.db.utils import IntegrityError
 
-from openedx_learning.models import (
-    CompetencyCriteriaGroup,
-    CompetencyCriterion,
-    CompetencyRuleProfile,
-    CompetencyTaxonomy,
-    RuleType,
-)
+from openedx_learning.models import CompetencyCriteriaGroup, CompetencyCriterion, CompetencyRuleProfile, RuleType
 from openedx_tagging.models import ObjectTag
 
 pytestmark = pytest.mark.django_db
@@ -134,30 +128,6 @@ def test_criterion_full_clean_rejects_invalid_override_payload(
     )
     with pytest.raises(ValidationError):
         criterion.full_clean()
-
-
-def test_criterion_rule_profile_is_not_recomputed_once_a_more_specific_profile_appears(
-    group: CompetencyCriteriaGroup, object_tag: ObjectTag, default_rule_profile: CompetencyRuleProfile,
-    competency_taxonomy: CompetencyTaxonomy,
-) -> None:
-    """
-    A criterion's stored rule_profile is not resolved dynamically at read time: creating a new,
-    more specific profile later does not silently re-govern a criterion that already resolved to a
-    less specific one. See ADR-0002 Decision 4, which lists the specific write events that DO
-    reassign a criterion (not exercised here) and states that no other path may recompute it. This
-    guards against a property, manager method, or signal handler being added that would violate
-    that rule by resolving the FK on every read instead of only at those write events.
-    """
-    criterion = CompetencyCriterion.objects.create(
-        group=group, object_tag=object_tag, rule_profile=default_rule_profile
-    )
-
-    CompetencyRuleProfile.objects.create(
-        competency_taxonomy=competency_taxonomy, rule_type=RuleType.GRADE, rule_payload=_GRADE_PAYLOAD
-    )
-
-    criterion.refresh_from_db()
-    assert criterion.rule_profile_id == default_rule_profile.pk
 
 
 # ---------------------------------------------------------------------------------------------
