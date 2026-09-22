@@ -41,7 +41,9 @@ class CompetencyTaxonomy(Taxonomy):
     taxonomy_overrides_org = models.BooleanField(
         default=False,
         help_text=_(
-            "If both an organization-scoped profile and a taxonomy-scoped profile from this taxonomy apply to the same criterion, False (the default) assigns the organization-scoped profile, and True assigns this taxonomy's own profile."
+            "If both an organization-scoped CompetencyRuleProfile and a taxonomy-scoped CompetencyRuleProfile "
+            "from this taxonomy apply to the same criterion, False (the default) assigns the organization-scoped "
+            "profile, and True assigns this taxonomy's own profile."
         ),
     )
 
