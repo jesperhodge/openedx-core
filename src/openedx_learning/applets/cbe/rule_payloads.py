@@ -93,8 +93,10 @@ def _validate_payload_keys(rule_type: str, payload: object, expected_keys: froze
 
 def validate_rule_payload(rule_type: str, payload: object) -> None:
     """
-    Raise ValidationError unless ``payload`` matches the shape ADR-0002 Decision 3 defines for
-    ``rule_type``, including when ``rule_type`` has no defined shape at all.
+    Raise ValidationError unless ``payload`` is a JSON object with exactly the keys ``rule_type``'s
+    shape requires and values within that shape's constraints -- for ``Grade``, ``op`` one of
+    ``gte``, ``lte``, ``eq``, ``value`` a fraction from 0.0 to 1.0, and ``scale`` equal to
+    ``"percent"`` -- including when ``rule_type`` has no defined shape at all.
     """
     match rule_type:
         case RuleType.GRADE:
