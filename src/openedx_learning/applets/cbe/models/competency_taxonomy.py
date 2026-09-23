@@ -1,5 +1,5 @@
 """
-Models for Competency-Based Education (CBE).
+The CompetencyTaxonomy model.
 """
 from openedx_tagging.models import Taxonomy
 
