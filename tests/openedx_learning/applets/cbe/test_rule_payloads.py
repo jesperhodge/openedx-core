@@ -8,9 +8,9 @@ eq, value is a fraction from 0.0 to 1.0 rather than a number out of 100, and sca
 import pytest
 from django.core.exceptions import ValidationError
 
-from openedx_learning.applets.cbe.rule_payloads import GradePayload, RuleType, validate_rule_payload
+from openedx_learning.applets.cbe.rule_payloads import GradeRulePayload, RuleType, validate_rule_payload
 
-_GRADE_PAYLOAD: GradePayload = {"op": "gte", "value": 0.8, "scale": "percent"}
+_GRADE_PAYLOAD: GradeRulePayload = {"op": "gte", "value": 0.8, "scale": "percent"}
 
 
 def test_a_well_formed_grade_payload_is_accepted() -> None:
@@ -79,8 +79,7 @@ def test_a_boolean_value_is_rejected_even_though_python_calls_it_an_int() -> Non
 def test_an_out_of_range_value_message_names_the_fraction_convention() -> None:
     """
     The message for a value given out of 100 (for example 80) names the 0.0 to 1.0 fraction
-    convention, so an author who wrote 80 meaning 80% is told what to write instead. This is the
-    single most likely authoring mistake for this payload.
+    convention, so an author who wrote 80 meaning 80% is told what to write instead.
     """
     with pytest.raises(ValidationError) as exc_info:
         validate_rule_payload(RuleType.GRADE, {"op": "gte", "value": 80, "scale": "percent"})
@@ -97,8 +96,8 @@ def test_a_wrong_keys_message_names_the_offending_keys() -> None:
         validate_rule_payload(RuleType.GRADE, {"op": "gte", "extra": 1})
 
     message = " ".join(exc_info.value.messages)
-    assert "extra" in message
-    assert "value" in message and "scale" in message
+    assert "missing scale, value" in message
+    assert "unexpected extra" in message
 
 
 def test_an_unsupported_rule_type_says_only_grade_is_defined() -> None:
@@ -116,16 +115,14 @@ def test_an_unsupported_rule_type_says_only_grade_is_defined() -> None:
 @pytest.mark.parametrize("rule_type", list(RuleType))
 def test_every_rule_type_choice_has_a_validation_branch(rule_type: RuleType) -> None:
     """
-    Every RuleType choice, which is what a serializer or admin form offers an author, is actually
-    saveable: validate_rule_payload's match statement has a case for it, rather than falling
-    through to the catch-all "not supported yet" case.
+    Guards against a future RuleType member shipping with no matching validate_rule_payload
+    branch: adding one without a branch would offer an author a choice that always rejects,
+    since it falls through to the catch-all "not supported yet" case regardless of payload.
 
-    A rule_type with no validation branch is always rejected regardless of payload content, so
-    declaring a RuleType member without a branch for it would offer an author a dead-end choice.
-    An empty payload is wrong for every currently defined shape, so it is rejected here too, but
-    for a shape-specific reason (e.g. missing keys) rather than because the rule_type itself is
-    unsupported. This pins the invariant so adding a RuleType member without a branch fails a test
-    instead of shipping.
+    Runs against every current and future RuleType member automatically, since it parametrizes
+    over list(RuleType) rather than naming Grade specifically. An empty payload is used because
+    it is wrong for every currently defined shape; the assertion below only checks that the
+    rejection reason is shape-specific (e.g. missing keys), not "unsupported rule type."
     """
     with pytest.raises(ValidationError) as exc_info:
         validate_rule_payload(rule_type, {})

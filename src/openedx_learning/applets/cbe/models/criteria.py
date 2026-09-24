@@ -1,5 +1,5 @@
 """
-The CompetencyAchievementCriteria models: CompetencyCriteriaGroup, CompetencyRuleProfile, and
+The Competency Criteria tree models: CompetencyCriteriaGroup, CompetencyRuleProfile, and
 CompetencyCriterion.
 
 See :ref:`openedx-learning-adr-0002` Decisions 2, 3 and 4 for the design and Decision 7 for each
@@ -39,9 +39,9 @@ class LogicOperator(models.TextChoices):
 
 class CompetencyCriteriaGroup(models.Model):
     """
-    An internal AND/OR node in a CompetencyAchievementCriteria expression tree.
+    An internal AND/OR node in a Competency Criteria tree.
 
-    A single CompetencyAchievementCriteria is one root CompetencyCriteriaGroup plus all of its
+    A single Competency Criteria tree is one root CompetencyCriteriaGroup plus all of its
     descendant groups and leaf :class:`CompetencyCriterion` rows. ``logic_operator`` says how
     this group's own children combine. ``ordering`` gives this group's own position among its
     siblings under their shared parent, which read-time evaluation and event-driven recomputation
@@ -138,9 +138,10 @@ class CompetencyRuleProfile(models.Model):
 
     Each row is scoped by at most one of ``organization``, ``course``, and ``competency_taxonomy``,
     enforced by the check constraint below; the row with all three null is the system default,
-    seeded once by migration and never created or deleted through the profile API. See ADR-0002
-    Decision 3 for how a :class:`CompetencyCriterion` is assigned one of these, and Decision 4 for
-    what happens when more than one scope's profile could apply to the same criterion.
+    seeded once by migration and never created or deleted through the profile API. When more than
+    one scope could apply to the same criterion, the most specific one wins (course beats
+    organization/taxonomy), and taxonomy_overrides_org breaks the one remaining tie between an
+    organization- and a taxonomy-scoped profile. See ADR-0002 Decision 3 & 4 for more details.
 
     A profile's scope is immutable after creation; only ``rule_type``, ``rule_payload`` and
     ``archived`` may change.
@@ -287,23 +288,12 @@ class CompetencyRuleProfile(models.Model):
 
 class CompetencyCriterion(models.Model):
     """
-    A leaf node in a CompetencyAchievementCriteria tree: one tag/object association plus its rule.
+    A leaf node in a Competency Criteria tree: one tag/object association plus its rule.
 
-    A null ``rule_profile`` does NOT mean "resolve the applicable profile at read time." ADR-0002
-    Decision 4 resolves which profile (or override) applies at four specific write events
-    (creation, a more specific profile appearing later, an author setting a per-criterion
-    override, and an override being cleared back to matching the computed profile), and stores
-    the result. ``rule_profile`` is null only when an author has set a per-criterion override; in
-    every other case it holds the id of the profile that was resolved at the relevant write event
-    and is never re-resolved dynamically. Do not add a property, manager method, or other helper
-    that recomputes it; that would contradict the ADR.
-
-    When ``rule_type_override`` is set, its ``rule_payload_override``'s shape (see
-    :func:`~openedx_learning.applets.cbe.rule_payloads.validate_rule_payload`) is validated from
-    ``clean()``, reached from both ``objects.create()`` and a plain ``instance.save()`` via
-    ``full_clean()``. A bulk ``QuerySet.update()``, ``bulk_create()``, and a DRF serializer that
-    writes straight to the database are NOT covered: none of them build or save a model instance,
-    so ``clean()`` never runs.
+    A null `rule_profile` does not mean "resolve at read time." ADR-0002 Decision 4 resolves and
+    stores the applicable profile (or override) at specific write events only; `rule_profile` is
+    null only when a per-criterion override is set instead. Do not add a property, manager method,
+    or other helper that recomputes it; that would contradict the ADR.
 
     .. no_pii:
     """
@@ -332,8 +322,14 @@ class CompetencyCriterion(models.Model):
         related_name="criteria",
         help_text=_("The profile this criterion uses by default. Null only when overrides are set instead."),
     )
-    rule_type_override = models.CharField(max_length=32, choices=RuleType, null=True, blank=True)
-    rule_payload_override = models.JSONField(null=True, blank=True)
+    rule_type_override = models.CharField(
+        max_length=32, choices=RuleType, null=True, blank=True,
+        help_text=_("Overrides rule_profile's rule_type for this criterion. Set only when rule_profile is null."),
+    )
+    rule_payload_override = models.JSONField(
+        null=True, blank=True,
+        help_text=_("Overrides rule_profile's rule_payload for this criterion. Set only when rule_profile is null."),
+    )
 
     history = HistoricalRecords()
 

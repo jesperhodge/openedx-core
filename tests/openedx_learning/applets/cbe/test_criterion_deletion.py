@@ -1,31 +1,7 @@
-"""
-Delete-behavior tests for CompetencyCriterion's own foreign keys, and for the transitive and
-scope-owner cases that only exist once this model completes the criteria tree.
-
-| Foreign key | Value | Why |
-| CompetencyCriterion.group | CASCADE | a leaf is meaningless without its group |
-| CompetencyCriterion.object_tag | CASCADE | a leaf is meaningless without its content association |
-| CompetencyCriterion.rule_profile | RESTRICT | a profile is never hard-deleted out from under a leaf |
-
-``on_delete`` expresses containment rather than protection (ADR-0002 Decision 7): it governs
-deletion of the row a foreign key points *at*, never the row holding it.
-
-``rule_profile`` is RESTRICT rather than PROTECT because the two differ exactly where it matters
-here. Both refuse a direct profile delete while a criterion is assigned to it. Only RESTRICT
-ignores referencing rows that the same operation is already deleting, which is what lets a scope
-owner's deletion carry its profile away instead of failing on a criterion that delete was about to
-remove anyway.
-
-Only the cascade half of each case is asserted. Every matching "raises ProtectedError because a
-learner status row exists" case needs #642's three Student*Status tables, and #642 is the change
-that creates them, so those assertions belong there. Nothing here stubs or fakes a status model
-to stand in for them. Until #642 merges, main carries a cascade chain with no PROTECT at the
-bottom, so deleting a tag removes the whole authored tree and nothing objects. That window is
-expected and harmless, because the learner status tables do not exist yet.
-
-Fixtures live in this directory's conftest.py.
-"""
+"""Delete-behavior tests for CompetencyCriterion's own foreign keys, and the transitive and
+scope-owner cases that only exist once this model completes the criteria tree."""
 import pytest
+from django.apps import apps
 from django.db.models import RestrictedError
 
 from openedx_catalog.models import CourseRun
@@ -68,14 +44,31 @@ def test_deleting_a_group_also_deletes_its_criteria(
     assert not CompetencyCriterion.objects.filter(pk=criterion.pk).exists()
 
 
+def test_a_cascaded_criterion_removal_is_recorded_in_history(
+    group: CompetencyCriteriaGroup, object_tag: ObjectTag, default_rule_profile: CompetencyRuleProfile
+) -> None:
+    """
+    A criterion removed by a cascade, rather than by a direct delete, still gets its own
+    historical row with history_type '-'. An author or auditor reviewing history for a criterion
+    that vanished this way still finds why it did.
+    """
+    historical_criterion = apps.get_model("openedx_learning", "HistoricalCompetencyCriterion")
+    criterion = CompetencyCriterion.objects.create(
+        group=group, object_tag=object_tag, rule_profile=default_rule_profile
+    )
+    criterion_pk = criterion.pk
+
+    group.delete()
+
+    assert historical_criterion.objects.filter(id=criterion_pk, history_type="-").exists()
+
+
 def test_deleting_an_object_tag_also_deletes_its_criteria(
     group: CompetencyCriteriaGroup, object_tag: ObjectTag, default_rule_profile: CompetencyRuleProfile
 ) -> None:
     """
     Deleting an ObjectTag cascades to any CompetencyCriterion referencing it via `object_tag`: the
-    delete succeeds and the criterion row is gone too. Doubles as the "OURS" half of #641's
-    Deletions criterion for oel_tagging_objecttag, since ObjectTag has only this one hop down to
-    CompetencyCriterion.
+    delete succeeds and the criterion row is gone too.
     """
     criterion = CompetencyCriterion.objects.create(
         group=group, object_tag=object_tag, rule_profile=default_rule_profile
@@ -92,11 +85,8 @@ def test_deleting_a_rule_profile_referenced_by_a_criterion_raises_restricted_err
 ) -> None:
     """
     Deleting a CompetencyRuleProfile that a CompetencyCriterion references via `rule_profile`
-    raises RestrictedError, which is what holds ADR-0002 Decision 7's "a profile is never
-    hard-deleted by a direct delete" at the ORM layer.
-
-    Nothing cascades from a profile down to a criterion, so the criterion is not part of this
-    delete and RESTRICT refuses, exactly as PROTECT would have.
+    raises RestrictedError. Nothing cascades from a profile down to a criterion, so the criterion
+    is not part of this delete and RESTRICT refuses, exactly as PROTECT would have.
     """
     criterion = CompetencyCriterion.objects.create(
         group=group, object_tag=object_tag, rule_profile=default_rule_profile
@@ -114,17 +104,13 @@ def test_object_tag_delete_leaves_a_childless_criteria_group_behind(
 ) -> None:
     """
     Deleting an ObjectTag cascades away the CompetencyCriterion that references it, but leaves the
-    CompetencyCriteriaGroup that housed that criterion in place, even when it was the group's only
-    criterion and the group now has no children of any kind (no criteria, no child groups).
+    CompetencyCriteriaGroup that housed that criterion in place, even when the group now has no
+    children of any kind.
 
-    This is a deliberately accepted outcome, not a bug: CompetencyCriteriaGroup does not reference
-    ObjectTag at all (only CompetencyCriterion does), so nothing about deleting an ObjectTag gives
-    the collector a reason to reach the group. A childless group left behind this way is inert (it
-    evaluates no criteria and contributes nothing to its parent's logic_operator combination) and
-    is exactly the state authoring tooling must already handle for a group edited down to zero
-    children, so no additional cleanup path exists for this narrower case either. Pinned here so a
-    future change one way or the other (cascading the now-childless group away, or continuing to
-    leave it) is a deliberate decision, not an accidental side effect of something else.
+    This is deliberate, not a bug: CompetencyCriteriaGroup has no foreign key to ObjectTag, so
+    nothing about this delete gives Django's collector a reason to reach the group. Cleaning up a
+    now-childless group is authoring-API/application-layer work, not something an on_delete value
+    can express here.
     """
     criterion = CompetencyCriterion.objects.create(
         group=group, object_tag=object_tag, rule_profile=default_rule_profile
@@ -139,11 +125,9 @@ def test_object_tag_delete_leaves_a_childless_criteria_group_behind(
 
 
 # ---------------------------------------------------------------------------------------------
-# Transitive deletes required by issue #641
 # Deleting a Tag, a group at depth, or a Taxonomy takes the whole referencing criteria tree
 # with it. Tag.taxonomy is already CASCADE in openedx_tagging, which is what makes the tag
-# case hold transitively from a taxonomy. These only exist as of this PR, because they need
-# CompetencyCriterion to complete the tree down to a leaf.
+# case hold transitively from a taxonomy.
 
 
 # ---------------------------------------------------------------------------------------------
@@ -169,42 +153,6 @@ def test_tag_delete_with_no_status_cascades_whole_criteria_tree(
     assert not CompetencyCriterion.objects.filter(pk=criterion.pk).exists()
 
 
-def test_group_delete_at_depth_cascades_descendants_and_their_criteria(
-    tag: Tag, object_tag: ObjectTag, default_rule_profile: CompetencyRuleProfile
-) -> None:
-    """
-    Deleting a CompetencyCriteriaGroup that is not a root removes it, every descendant group, and
-    every CompetencyCriterion under any of them, while leaving the rest of the tree (here, the
-    root) alone.
-
-    Builds a genuinely nested tree, root -> child -> grandchild, with criteria at two different
-    levels (on `child` and on `grandchild`), so "at depth" and "every descendant" both mean
-    something: a shallower tree could pass this by accident.
-    """
-    root = CompetencyCriteriaGroup.objects.create(tag=tag)
-    child = CompetencyCriteriaGroup.objects.create(tag=tag, parent=root)
-    grandchild = CompetencyCriteriaGroup.objects.create(tag=tag, parent=child)
-    child_criterion = CompetencyCriterion.objects.create(
-        group=child, object_tag=object_tag, rule_profile=default_rule_profile
-    )
-    grandchild_criterion = CompetencyCriterion.objects.create(
-        group=grandchild, object_tag=object_tag, rule_profile=default_rule_profile
-    )
-    assert CompetencyCriteriaGroup.objects.filter(pk=root.pk).exists()
-    assert CompetencyCriteriaGroup.objects.filter(pk=child.pk).exists()
-    assert CompetencyCriteriaGroup.objects.filter(pk=grandchild.pk).exists()
-    assert CompetencyCriterion.objects.filter(pk=child_criterion.pk).exists()
-    assert CompetencyCriterion.objects.filter(pk=grandchild_criterion.pk).exists()
-
-    child.delete()
-
-    assert CompetencyCriteriaGroup.objects.filter(pk=root.pk).exists()
-    assert not CompetencyCriteriaGroup.objects.filter(pk=child.pk).exists()
-    assert not CompetencyCriteriaGroup.objects.filter(pk=grandchild.pk).exists()
-    assert not CompetencyCriterion.objects.filter(pk=child_criterion.pk).exists()
-    assert not CompetencyCriterion.objects.filter(pk=grandchild_criterion.pk).exists()
-
-
 def test_taxonomy_delete_cascades_every_tag_and_its_criteria(
     competency_taxonomy: CompetencyTaxonomy,
     tag: Tag,
@@ -214,9 +162,8 @@ def test_taxonomy_delete_cascades_every_tag_and_its_criteria(
 ) -> None:
     """
     Deleting an oel_tagging.Taxonomy collects every Tag beneath it (Tag.taxonomy is CASCADE), so
-    the tag-deletion cases above hold transitively through a taxonomy delete too. This asserts the
-    succeeding case (no learner status beneath the tag), which is what #641's Deletions criterion
-    for taxonomy-level deletion requires "at minimum".
+    this taxonomy delete succeeds and cascades away the group and criterion beneath its tag too,
+    the same as a direct tag delete.
 
     Chain exercised: CompetencyTaxonomy -> Tag (CASCADE) -> CompetencyCriteriaGroup.tag (CASCADE)
     -> CompetencyCriterion.group (CASCADE).

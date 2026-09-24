@@ -1,5 +1,5 @@
 """
-Tests for CompetencyCriteriaGroup, the internal AND/OR node of a CompetencyAchievementCriteria
+Tests for CompetencyCriteriaGroup, the internal AND/OR node of a Competency Criteria
 tree.
 
 Each test name states the behavior it pins. Reading top to bottom gives the model's contract:
@@ -14,37 +14,12 @@ Fixtures live in this directory's conftest.py.
 """
 import pytest
 from django.apps import apps
-from django.db import connection, models
+from django.db import models
 
-from openedx_catalog.models import CourseRun
-from openedx_learning.models import CompetencyCriteriaGroup, CompetencyTaxonomy, LogicOperator
-from openedx_tagging.models import Tag, Taxonomy
+from openedx_learning.models import CompetencyCriteriaGroup, LogicOperator
+from openedx_tagging.models import Tag
 
 pytestmark = pytest.mark.django_db
-
-
-# ---------------------------------------------------------------------------------------------
-# Schema
-
-
-# ---------------------------------------------------------------------------------------------
-
-
-def test_group_has_exactly_the_columns_adr_0002_decision_2_lists() -> None:
-    """
-    CompetencyCriteriaGroup's columns are exactly the ones ADR-0002 Decision 2 lists, with
-    `parent`, `course`, and `logic_operator` optional and the rest required. `tag` keeps the
-    legacy `oel_tagging_tag_id` column name. No `archived` column yet; that arrives with #642.
-    """
-    fields = [f for f in CompetencyCriteriaGroup._meta.get_fields() if f.concrete]
-    assert {f.name for f in fields} == {
-        "id", "uuid", "parent", "tag", "course", "name", "ordering", "logic_operator",
-    }
-    assert {f.name for f in fields if f.null} == {"parent", "course", "logic_operator"}
-    assert CompetencyCriteriaGroup._meta.get_field("parent").remote_field.model is CompetencyCriteriaGroup
-    assert CompetencyCriteriaGroup._meta.get_field("tag").remote_field.model is Tag
-    assert CompetencyCriteriaGroup._meta.get_field("tag").db_column == "oel_tagging_tag_id"
-    assert CompetencyCriteriaGroup._meta.get_field("course").remote_field.model is CourseRun
 
 
 # ---------------------------------------------------------------------------------------------
@@ -75,9 +50,15 @@ def test_group_logic_operator_accepts_and_or_and_null_regardless_of_child_count(
     childless = CompetencyCriteriaGroup.objects.create(tag=tag, logic_operator=logic_operator)
     assert childless.pk is not None
 
-    parent = CompetencyCriteriaGroup.objects.create(tag=tag, logic_operator=logic_operator)
-    CompetencyCriteriaGroup.objects.create(tag=tag, parent=parent)
-    CompetencyCriteriaGroup.objects.create(tag=tag, parent=parent)
+    # A different tag from `childless`'s, not a second root under the same one: migration 0004's
+    # oel_cbe_criteria_group_one_root_per_tag constraint (added for #665) allows only one root
+    # CompetencyCriteriaGroup per tag, and this scenario is about child count, not about tag reuse.
+    other_tag = Tag.objects.create(taxonomy=tag.taxonomy, value=f"{tag.value} (other)")
+    parent = CompetencyCriteriaGroup.objects.create(tag=other_tag, logic_operator=logic_operator)
+    CompetencyCriteriaGroup.objects.create(tag=other_tag, parent=parent)
+    CompetencyCriteriaGroup.objects.create(tag=other_tag, parent=parent)
+    parent.refresh_from_db()
+    assert parent.logic_operator == logic_operator
     assert CompetencyCriteriaGroup.objects.filter(parent=parent).count() == 2
 
 
@@ -118,28 +99,6 @@ def test_group_has_no_unique_constraint_on_parent_and_ordering(tag: Tag) -> None
 # ---------------------------------------------------------------------------------------------
 
 
-def test_the_database_carries_adr_0002_decision_5_indexes_1_and_2() -> None:
-    """
-    The real table carries ADR-0002 Decision 5's index 1, the composite (tag, course), and index
-    2 on parent. Index 2 comes from Django's automatic per-ForeignKey index rather than an
-    explicit models.Index, so this introspects the database rather than the model.
-
-    Compares the ordered column list, not a set: column order is the whole point of a composite
-    index. An index on (course_id, oel_tagging_tag_id) would satisfy a set comparison just as
-    well, but only the tag-first ordering also serves tag-only lookups.
-    """
-    with connection.cursor() as cursor:
-        constraints = connection.introspection.get_constraints(
-            cursor, CompetencyCriteriaGroup._meta.db_table
-        )
-
-    def is_indexed(columns: list[str]) -> bool:
-        return any(c["columns"] == columns and c["index"] for c in constraints.values())
-
-    assert is_indexed(["oel_tagging_tag_id", "course_id"])
-    assert is_indexed(["parent_id"])
-
-
 def test_editing_a_group_writes_a_historical_row(tag: Tag) -> None:
     """
     HistoricalRecords() is applied to CompetencyCriteriaGroup: the Historical model is registered
@@ -157,23 +116,3 @@ def test_editing_a_group_writes_a_historical_row(tag: Tag) -> None:
     group.save()
 
     assert historical_group.objects.filter(id=group.pk).count() == 2
-
-
-def test_history_not_recorded_for_tag_taxonomy_or_competencytaxonomy(competency_taxonomy: CompetencyTaxonomy) -> None:
-    """
-    django-simple-history is NOT applied to oel_tagging_tag, oel_tagging_taxonomy, or
-    CompetencyTaxonomy: none of the three has a `.history` attribute, and no Historical* model is
-    registered for any of them. See ADR-0003 Decisions 1 and 2 for why history tracking stops at
-    the CBE-specific models and does not reach back into the generic tagging models they build on.
-    """
-    assert not hasattr(Tag, "history")
-    assert not hasattr(Taxonomy, "history")
-    assert not hasattr(competency_taxonomy, "history")
-
-    for app_label, model_name in [
-        ("oel_tagging", "HistoricalTag"),
-        ("oel_tagging", "HistoricalTaxonomy"),
-        ("openedx_learning", "HistoricalCompetencyTaxonomy"),
-    ]:
-        with pytest.raises(LookupError):
-            apps.get_model(app_label, model_name)

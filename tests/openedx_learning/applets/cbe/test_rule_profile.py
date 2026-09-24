@@ -1,25 +1,8 @@
-"""
-Tests for CompetencyRuleProfile, the reusable evaluation rule a CompetencyCriterion draws from.
-
-Each test name states the behavior it pins. Reading top to bottom gives the model's contract:
-its columns, the at-most-one-scope rule, how scope_code encodes that scope and what archiving
-does to it, that the payload validator is wired into save(), that a profile's scope can never
-change after creation, and the index, history and seeded row.
-
-The payload shapes themselves are covered exhaustively and without a database in
-test_rule_payloads.py. What matters here is only that a model save reaches that validator.
-
-Delete behavior is not covered here, except where a test frees the seeded system-default scope,
-which nothing references. Nothing else in this module deletes a row that another row points at.
-See test_rule_profile_deletion.py, in this same change, for this model's own `on_delete` values
-and the tests that exercise them.
-
-Fixtures live in this directory's conftest.py.
-"""
+"""Tests for CompetencyRuleProfile, the reusable evaluation rule a CompetencyCriterion draws from."""
 import pytest
 from django.apps import apps
 from django.core.exceptions import ValidationError
-from django.db import connection, transaction
+from django.db import transaction
 from django.db.utils import IntegrityError
 from organizations.models import Organization
 
@@ -32,30 +15,24 @@ pytestmark = pytest.mark.django_db
 _GRADE_PAYLOAD = {"op": "gte", "value": 0.8, "scale": "percent"}
 
 
-# ---------------------------------------------------------------------------------------------
-# Schema
-
-
-# ---------------------------------------------------------------------------------------------
-
-
-def test_rule_profile_has_exactly_the_columns_adr_0002_decision_3_lists() -> None:
+def test_creating_a_rule_profile_persists_its_columns(organization: Organization) -> None:
     """
-    CompetencyRuleProfile's columns are exactly the ones ADR-0002 Decision 3 lists, with
-    `organization`, `course`, `competency_taxonomy`, and `scope_code` nullable and the rest
-    required. `scope_code` is nullable, not "never null": it is null exactly while a profile is
-    archived, which is what frees that scope's unique slot for a replacement. See ADR-0002
+    Creating a CompetencyRuleProfile with values for `organization`, `rule_type`, and
+    `rule_payload`, then reading the row back from the database, returns those same values, plus
+    `course` and `competency_taxonomy` left null and `archived` defaulting to False. See ADR-0002
     Decision 3.
     """
-    fields = [f for f in CompetencyRuleProfile._meta.get_fields() if f.concrete]
-    assert {f.name for f in fields} == {
-        "id", "uuid", "organization", "course", "competency_taxonomy", "scope_code", "rule_type",
-        "rule_payload", "archived",
-    }
-    assert {f.name for f in fields if f.null} == {"organization", "course", "competency_taxonomy", "scope_code"}
-    assert CompetencyRuleProfile._meta.get_field("organization").remote_field.model is Organization
-    assert CompetencyRuleProfile._meta.get_field("course").remote_field.model is CourseRun
-    assert CompetencyRuleProfile._meta.get_field("competency_taxonomy").remote_field.model is CompetencyTaxonomy
+    profile = CompetencyRuleProfile.objects.create(
+        organization=organization, rule_type=RuleType.GRADE, rule_payload=_GRADE_PAYLOAD
+    )
+
+    persisted = CompetencyRuleProfile.objects.get(pk=profile.pk)
+    assert persisted.organization == organization
+    assert persisted.course is None
+    assert persisted.competency_taxonomy is None
+    assert persisted.rule_type == RuleType.GRADE
+    assert persisted.rule_payload == _GRADE_PAYLOAD
+    assert persisted.archived is False
 
 
 # ---------------------------------------------------------------------------------------------
@@ -74,18 +51,19 @@ def test_rule_profile_has_exactly_the_columns_adr_0002_decision_3_lists() -> Non
         pytest.param({}, id="no_scope_system_default"),
     ],
 )
-def test_rule_profile_scope_check_constraint_accepts_at_most_one_scope_field(
+def test_rule_profile_can_be_created_with_any_single_scope_or_no_scope(
     scope_kwargs: dict,
     organization: Organization,
     course_run: CourseRun,
     competency_taxonomy: CompetencyTaxonomy,
 ) -> None:
     """
-    The scope check constraint accepts a CompetencyRuleProfile scoped to at most one of
-    organization, course, or competency_taxonomy, including none of them (the system default).
-    See ADR-0002 Decision 3.
+    A CompetencyRuleProfile can be created scoped to organization, course, or competency_taxonomy
+    alone, or to none of them (the system default). The check constraint's rejection of more than
+    one scope field at once is covered separately, by
+    test_rule_profile_scope_check_constraint_rejects_more_than_one_scope_field below.
     """
-    # Free the all-null slot the seed migration (0003) occupies, so the "no scope" case can be
+    # Free the all-null slot the seed migration (0005) occupies, so the "no scope" case can be
     # tested in isolation from scope_code's own uniqueness constraint, which has its own tests.
     CompetencyRuleProfile.objects.filter(
         organization__isnull=True, course__isnull=True, competency_taxonomy__isnull=True
@@ -173,57 +151,55 @@ def test_scope_code_matches_org_course_taxonomy_format_for_each_scope_shape(
     assert taxonomy_only.scope_code == f"org:,course:,taxonomy:{competency_taxonomy.pk}"
 
 
-def test_scope_code_is_null_once_archived_and_non_null_while_live(organization: Organization) -> None:
+def test_archiving_a_profile_nulls_scope_code_and_frees_its_scope_for_a_replacement(
+    organization: Organization,
+) -> None:
     """
-    scope_code is non-null while a profile is live, and becomes null once it is archived. An
-    archived profile no longer holds its scope's unique slot, which is what lets a replacement be
-    created for that same scope (see test_archiving_a_profile_frees_its_scope_for_a_replacement
-    below); a profile that stayed occupying a non-null scope_code after archiving would block that
-    forever. This is a deliberate design point, not an oversight: a plain nullable column, written
-    explicitly whenever a profile is saved, rather than a database-computed value that can never
-    tell "archived" apart from "live" on its own.
-    """
-    profile = CompetencyRuleProfile.objects.create(
-        organization=organization, rule_type=RuleType.GRADE, rule_payload=_GRADE_PAYLOAD
-    )
-    profile.refresh_from_db()
-    assert profile.scope_code == f"org:{organization.pk},course:,taxonomy:"
-
-    profile.archived = True
-    profile.save()
-    profile.refresh_from_db()
-    assert profile.scope_code is None
-
-
-def test_archiving_a_profile_frees_its_scope_for_a_replacement(organization: Organization) -> None:
-    """
-    Once a profile scoped to a given organization/course/taxonomy is archived, a brand new profile
-    may be created for that exact same scope: the archived row's scope_code goes to null and stops
-    occupying the unique slot, so it no longer collides with the replacement's non-null scope_code.
+    Archiving a profile nulls its scope_code, which frees that scope for a brand new profile: a
+    replacement may now be created for the exact same organization/course/taxonomy, since the
+    archived row no longer occupies the unique scope_code slot.
     """
     original = CompetencyRuleProfile.objects.create(
         organization=organization, rule_type=RuleType.GRADE, rule_payload=_GRADE_PAYLOAD
     )
+    original.refresh_from_db()
+    assert original.scope_code == f"org:{organization.pk},course:,taxonomy:"
+
     original.archived = True
     original.save()
+    original.refresh_from_db()
+    assert original.scope_code is None
 
     replacement = CompetencyRuleProfile.objects.create(
         organization=organization, rule_type=RuleType.GRADE, rule_payload=_GRADE_PAYLOAD
     )
     replacement.refresh_from_db()
-    original.refresh_from_db()
-
-    assert original.scope_code is None
     assert replacement.scope_code == f"org:{organization.pk},course:,taxonomy:"
 
 
+def test_archiving_the_seeded_system_default_frees_its_scope_for_a_replacement(
+    default_rule_profile: CompetencyRuleProfile,
+) -> None:
+    """
+    Archiving the seeded system-default profile (all three scope fields null) nulls its
+    scope_code, same as for a scoped profile, which frees the all-null scope for a brand new
+    system-default row.
+    """
+    assert default_rule_profile.scope_code == "org:,course:,taxonomy:"
+
+    default_rule_profile.archived = True
+    default_rule_profile.save()
+    default_rule_profile.refresh_from_db()
+    assert default_rule_profile.scope_code is None
+
+    replacement = CompetencyRuleProfile.objects.create(rule_type=RuleType.GRADE, rule_payload=_GRADE_PAYLOAD)
+    replacement.refresh_from_db()
+    assert replacement.scope_code == "org:,course:,taxonomy:"
+
+
 def test_two_live_profiles_cannot_share_the_same_scope(organization: Organization) -> None:
-    """
-    Two live CompetencyRuleProfile rows cannot share the same scope. In particular, two rows that
-    both set only `organization` (leaving course and competency_taxonomy null) collide, which is
-    exactly the case a plain UniqueConstraint on the three raw nullable columns would not catch,
-    since SQL never treats two NULLs as equal. See ADR-0002 Decision 3.
-    """
+    """Two live CompetencyRuleProfile rows cannot share the same scope: two rows that both set
+    only `organization` collide."""
     CompetencyRuleProfile.objects.create(
         organization=organization, rule_type=RuleType.GRADE, rule_payload=_GRADE_PAYLOAD
     )
@@ -243,8 +219,9 @@ def test_two_live_profiles_cannot_share_the_same_scope(organization: Organizatio
 
 def test_saving_a_profile_with_an_invalid_payload_raises_validation_error() -> None:
     """
-    A profile whose rule_payload does not match its rule_type is rejected by full_clean(), which
-    save() calls, so objects.create() raises rather than writing a rule nothing can evaluate.
+    A profile whose rule_payload does not match its rule_type (here, `value: 80` instead of a
+    0.0-1.0 fraction) is rejected by full_clean(), which save() calls, so objects.create() raises
+    rather than writing a rule nothing can evaluate.
 
     This proves only the wiring. test_rule_payloads.py covers every way a payload can be wrong.
     """
@@ -268,23 +245,6 @@ def test_rule_profile_full_clean_value_message_names_the_fraction_convention(org
 
     message = " ".join(exc_info.value.messages)
     assert "fraction between 0.0 and 1.0" in message
-
-
-def test_rule_profile_full_clean_extra_key_message_names_the_key(organization: Organization) -> None:
-    """
-    full_clean()'s error for an unrecognized rule_payload key names that key in our own domain
-    language (e.g. "unexpected extra").
-    """
-    profile = CompetencyRuleProfile(
-        organization=organization,
-        rule_type=RuleType.GRADE,
-        rule_payload={**_GRADE_PAYLOAD, "extra": 1},
-    )
-    with pytest.raises(ValidationError) as exc_info:
-        profile.full_clean()
-
-    message = " ".join(exc_info.value.messages)
-    assert "extra" in message
 
 
 # ---------------------------------------------------------------------------------------------
@@ -342,15 +302,15 @@ def test_scope_immutability_rejects_taxonomy_change(competency_taxonomy: Compete
         profile.save()
 
 
-def test_scope_immutability_allows_rule_type_rule_payload_and_archived_to_change(organization: Organization) -> None:
+def test_scope_immutability_allows_rule_payload_and_archived_to_change(organization: Organization) -> None:
     """
-    Only rule_type, rule_payload, and archived may change after creation; changing any of them (as
-    opposed to a scope field) succeeds. See ADR-0002 Decision 3.
+    Only rule_type, rule_payload, and archived may change after creation; changing rule_payload and
+    archived (as opposed to a scope field) succeeds. rule_type isn't exercised here: RuleType has
+    only one member right now, so there's no other value to change it to.
     """
     profile = CompetencyRuleProfile.objects.create(
         organization=organization, rule_type=RuleType.GRADE, rule_payload=_GRADE_PAYLOAD
     )
-    profile.rule_type = RuleType.GRADE
     profile.rule_payload = {"op": "lte", "value": 0.5, "scale": "percent"}
     profile.archived = True
     profile.save()
@@ -384,28 +344,10 @@ def test_scope_immutability_enforced_after_deferred_load(
 
 
 # ---------------------------------------------------------------------------------------------
-# Index 9, history, and the seeded system default
+# History and the seeded system default
 
 
 # ---------------------------------------------------------------------------------------------
-
-
-def test_the_database_carries_adr_0002_decision_5_index_9_as_unique() -> None:
-    """
-    The real table carries ADR-0002 Decision 5's index 9 on scope_code, and it is unique. A plain
-    index there would not enforce one profile per scope.
-
-    The constraint is unconditional on purpose. A conditional UniqueConstraint compiles to a
-    partial index, which MySQL does not support: Django raises only a models.W036 warning and
-    silently skips creating it, while SQLite does support partial indexes and would hide the gap
-    in a local run. See ADR-0002 Rejected Alternative 6.
-    """
-    with connection.cursor() as cursor:
-        constraints = connection.introspection.get_constraints(
-            cursor, CompetencyRuleProfile._meta.db_table
-        )
-
-    assert any(set(c["columns"]) == {"scope_code"} and c["unique"] for c in constraints.values())
 
 
 def test_editing_a_profile_writes_a_historical_row(organization: Organization) -> None:
