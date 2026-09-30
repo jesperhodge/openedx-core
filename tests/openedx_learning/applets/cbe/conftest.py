@@ -72,12 +72,7 @@ def _default_rule_profile() -> CompetencyRuleProfile:
 
 @pytest.fixture(name="user")
 def _user():
-    """
-    Create a single learner for use in these tests.
-
-    Deliberately unannotated: the user model is swappable, so this library must not
-    name a concrete one (edx-lint enforces that as `imported-auth-user`).
-    """
+    """Create a single learner for use in these tests."""
     return get_user_model().objects.create(username="learner")
 
 
