@@ -311,9 +311,6 @@ class CompetencyCriterion(models.Model):
     history = HistoricalRecords()
 
     class Meta:
-        # No db_table override: the table is Django's default, openedx_learning_competencycriterion.
-        # verbose_name/verbose_name_plural are set explicitly because Django's default pluralization
-        # of "CompetencyCriterion" is "competency criterions". See ADR-0002 Decision 4.
         verbose_name = _("Competency Criterion")
         verbose_name_plural = _("Competency Criteria")
         constraints = [
