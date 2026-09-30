@@ -14,7 +14,6 @@ Fixtures live in this directory's conftest.py.
 """
 import pytest
 from django.apps import apps
-from django.db import models
 
 from openedx_learning.models import CompetencyCriteriaGroup, LogicOperator
 from openedx_tagging.models import Tag
@@ -77,11 +76,6 @@ def test_group_has_no_unique_constraint_on_parent_and_ordering(tag: Tag) -> None
     child's FK can't point at a not-yet-existing parent row), so there is no single-row state to
     check a per-parent uniqueness rule against, and none is declared. See ADR-0002 Decision 2.
     """
-    unique_constraints = [
-        c for c in CompetencyCriteriaGroup._meta.constraints if isinstance(c, models.UniqueConstraint)
-    ]
-    assert not any({"parent", "ordering"} <= set(c.fields) for c in unique_constraints)
-
     parent = CompetencyCriteriaGroup.objects.create(tag=tag)
     sibling_a = CompetencyCriteriaGroup.objects.create(tag=tag, parent=parent, ordering=1)
     sibling_b = CompetencyCriteriaGroup.objects.create(tag=tag, parent=parent, ordering=1)
