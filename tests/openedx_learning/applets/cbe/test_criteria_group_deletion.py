@@ -1,7 +1,6 @@
 """Delete-behavior tests for CompetencyCriteriaGroup's own foreign keys."""
 import pytest
 from django.apps import apps
-from django.db import connection
 
 from openedx_catalog.models import CourseRun
 from openedx_learning.models import CompetencyCriteriaGroup, CompetencyTaxonomy
@@ -58,6 +57,11 @@ def test_deleting_a_course_run_also_deletes_its_course_scoped_criteria_groups(
     Deleting a CourseRun cascades to any CompetencyCriteriaGroup scoped to it via `course`: the
     delete succeeds and the group row is gone too. A course-scoped criteria tree has no meaning
     once the course run it evaluates against no longer exists.
+
+    `course` is a nullable cascading foreign key. MySQL cannot defer foreign-key constraint
+    checks, so Django's collector nulls such a key before the DELETE; SQLite never does. A
+    regression in that MySQL path therefore fails this test in CI (which runs MySQL) while still
+    passing locally on SQLite.
     """
     group = CompetencyCriteriaGroup.objects.create(tag=tag, course=course_run)
     assert CompetencyCriteriaGroup.objects.filter(pk=group.pk).exists()
@@ -97,34 +101,4 @@ def test_deleting_a_taxonomy_also_deletes_its_tags_criteria_groups(competency_ta
     competency_taxonomy.delete()
 
     assert not Tag.objects.filter(pk=tag.pk).exists()
-    assert not CompetencyCriteriaGroup.objects.filter(pk=group.pk).exists()
-
-
-# ---------------------------------------------------------------------------------------------
-# MySQL collector semantics, reproduced on SQLite
-# MySQL cannot defer foreign-key constraint checks, and Django's CASCADE handler reads that
-# flag directly: it nulls a nullable cascading foreign key before the DELETE. On SQLite that
-# nulling never happens, so the test below monkeypatches the flag to reproduce it. Without the
-# monkeypatch it passes against broken and correct code alike, so do not drop it.
-
-
-# ---------------------------------------------------------------------------------------------
-
-
-def test_course_run_delete_cascades_its_course_scoped_criteria_group_under_mysql_collector_semantics(
-    monkeypatch: pytest.MonkeyPatch, tag: Tag, course_run: CourseRun
-) -> None:
-    """
-    Deleting a CourseRun with a course-scoped CompetencyCriteriaGroup succeeds and cascades the
-    group away even under MySQL's non-deferred constraint semantics. `course` is a nullable
-    cascading foreign key, so Django's collector nulls it before the DELETE rather than only
-    after. CompetencyCriteriaGroup carries no uniqueness constraint a null `course_id` could
-    collide with, so this path is expected to just succeed; pinned here so a regression that
-    breaks it does not go unnoticed.
-    """
-    monkeypatch.setattr(type(connection.features), "can_defer_constraint_checks", False, raising=False)
-    group = CompetencyCriteriaGroup.objects.create(tag=tag, course=course_run)
-
-    course_run.delete()
-
     assert not CompetencyCriteriaGroup.objects.filter(pk=group.pk).exists()
