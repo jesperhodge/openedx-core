@@ -1,5 +1,15 @@
 """
-Models tracking a learner's mastery status for a competency.
+Models tracking a learner's mastery status at each level of a criteria tree.
+
+:class:`StudentCompetencyCriteriaStatus` covers one leaf :class:`~openedx_learning.models.CompetencyCriterion`
+and :class:`StudentCompetencyStatus` covers one :class:`~openedx_tagging.models.Tag`. Each holds one row per
+learner per node, updated in place (ADR-0003 Decision 5). Which writes may raise or lower a status is decided
+in the API layer, not here (ADR-0004 Decisions 4 and 6). ``created`` and ``modified`` are caller-supplied
+because ``auto_now`` does not fire on ``QuerySet.update()``, which is how conditional raises are written.
+``user`` is ``CASCADE`` so that this library never vetoes ``User.delete()`` platform-wide. The node foreign
+keys are ``PROTECT`` because every foreign key above them in the criteria tree is ``CASCADE``: without
+``PROTECT``, deleting a tag, taxonomy, group or ``ObjectTag`` would silently delete the learner status beneath
+it (ADR-0002 Decision 7).
 """
 from django.conf import settings
 from django.db import models
@@ -7,10 +17,13 @@ from django.db import models
 from openedx_django_lib.fields import manual_date_time_field
 from openedx_tagging.models import Tag
 
+from .criteria import CompetencyCriterion
+
 __all__ = [
     "MasteryStatus",
     "CompetencyMasteryStatus",
     "StudentCompetencyStatus",
+    "StudentCompetencyCriteriaStatus",
 ]
 
 
@@ -86,5 +99,43 @@ class StudentCompetencyStatus(models.Model):
             models.CheckConstraint(
                 condition=models.Q(status__in=(MasteryStatus.PARTIALLY_ATTEMPTED, MasteryStatus.DEMONSTRATED)),
                 name="oex_learning_studentcompetencystatus_status_allowed",
+            ),
+        ]
+
+
+class StudentCompetencyCriteriaStatus(models.Model):
+    """
+    A learner's current mastery status for one leaf ``CompetencyCriterion``.
+
+    One row per learner per criterion, updated in place (ADR-0003 Decision 5).
+
+    .. no_pii:
+    """
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="+",
+    )
+    criterion = models.ForeignKey(
+        CompetencyCriterion,
+        db_column="competency_criteria_id",
+        on_delete=models.PROTECT,
+        related_name="+",
+    )
+    status = models.ForeignKey(
+        CompetencyMasteryStatus,
+        on_delete=models.PROTECT,
+        related_name="+",
+    )
+    created = manual_date_time_field()
+    modified = manual_date_time_field()
+
+    class Meta:
+        constraints = [
+            # ADR-0002 Decision 5 index 6.
+            models.UniqueConstraint(
+                fields=("user", "criterion"),
+                name="oex_learning_studentcriteriastatus_user_criterion_uniq",
             ),
         ]
